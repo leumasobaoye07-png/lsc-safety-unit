@@ -607,7 +607,7 @@ function App(){
     const allSundays = Object.values(QUARTERS).flatMap(q=>q.months.flatMap(mo=>mo.sundays));
     const scheduled = allSundays.filter(s=>Object.values(s.slots).some(p=>p.some(pair=>pair.includes(member.id)))).length;
     const today = new Date(); today.setHours(0,0,0,0);
-    const present = (IS_DEMO ? [] : clockedIn ? Object.keys(clockedIn).filter(id=>id===member.id).length : 0);
+    const present = clockedIn ? Object.keys(clockedIn).filter(id=>id===member.id).length : 0;
     const pct = scheduled > 0 ? Math.min(100, Math.round((present / Math.max(scheduled, 1)) * 100)) : 0;
     return {...member, scheduled, present, pct};
   }).sort((a,b) => b.pct - a.pct || b.present - a.present);
