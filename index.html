@@ -295,10 +295,57 @@ function App(){
   const [coverReason,setCoverReason]=useState("");
   const [newMember,setNewMember]=useState({name:"",pin:""});
   const [newMemberMsg,setNewMemberMsg]=useState("");
+  const [monthlySy,setMonthlySy]=useState(new Date().getFullYear());
+  const [monthlySm,setMonthlySm]=useState(new Date().getMonth());
+  const [dutyReminder,setDutyReminder]=useState(null);
 
   useEffect(()=>{
     init();
-    const t=setInterval(()=>setNow(new Date()),1000);
+    const t=setInterval(()=>{
+      setNow(new Date());
+      // Duty reminder check - every minute on Sundays
+      const n2=new Date();
+      if(n2.getDay()===0 && n2.getSeconds()<5){
+        const mins=n2.getHours()*60+n2.getMinutes();
+        const SLOTS=[
+          {id:"gate-early",   start:450, label:"At the Gate (7:30 AM)"},
+          {id:"camera-early", start:510, label:"Camera Watch (8:30 AM)"},
+          {id:"gate-late",    start:540, label:"At the Gate (9:00 AM)"},
+          {id:"camera-late",  start:600, label:"Camera Watch (10:00 AM)"},
+          {id:"patrol",       start:450, label:"Patrol (Throughout Service)"},
+        ];
+        const todayR=findToday();
+        if(todayR){
+          SLOTS.forEach(slot=>{
+            const diff=slot.start-mins;
+            if(diff===30){
+              // Check if current user is in this slot
+              const pairs=todayR.slots[slot.id]||[];
+              const inSlot=pairs.some(pair=>pair.includes(user?.id));
+              if(inSlot){
+                setDutyReminder({label:slot.label,mins:30});
+                // Browser notification
+                if(Notification && Notification.permission==="granted"){
+                  new Notification("LSC Safety Unit",{body:"Your duty starts in 30 minutes: "+slot.label,icon:"/favicon.ico"});
+                }
+                setTimeout(()=>setDutyReminder(null),5*60*1000);
+              }
+            }
+            if(diff===10){
+              const pairs=todayR.slots[slot.id]||[];
+              const inSlot=pairs.some(pair=>pair.includes(user?.id));
+              if(inSlot){
+                setDutyReminder({label:slot.label,mins:10});
+                if(Notification && Notification.permission==="granted"){
+                  new Notification("LSC Safety Unit",{body:"Your duty starts in 10 minutes: "+slot.label,icon:"/favicon.ico"});
+                }
+                setTimeout(()=>setDutyReminder(null),3*60*1000);
+              }
+            }
+          });
+        }
+      }
+    },1000);
     const n=new Date();const qMap={0:"Q1",1:"Q1",2:"Q1",3:"Q2",4:"Q2",5:"Q2",6:"Q3",7:"Q3",8:"Q3",9:"Q4",10:"Q4",11:"Q4"};
     const qk=`${qMap[n.getMonth()]}-${n.getFullYear()}`;if(QUARTERS[qk]){setRQ(qk);setRM(0);}
     return()=>{clearInterval(t);if(emTimer.current)clearTimeout(emTimer.current);};
@@ -530,7 +577,15 @@ function App(){
       ),
       div({textAlign:"center",marginTop:18,fontSize:10,color:C.dim},'"Unless the LORD watches over the city, the watchmen stand guard in vain." — Psalm 127:1')
     ),
-    step==="pin"&&selMember&&h(PinPad,{member:selMember,onSuccess:()=>{setUser(selMember);setStep("select");setTab("home");},onCancel:()=>{setStep("select");setSelMember(null);}})
+    step==="pin"&&selMember&&h(PinPad,{member:selMember,onSuccess:()=>{
+              setUser(selMember);
+              setStep("select");
+              setTab("home");
+              // Request browser notification permission
+              if(typeof Notification !== "undefined" && Notification.permission === "default"){
+                Notification.requestPermission();
+              }
+            },onCancel:()=>{setStep("select");setSelMember(null);}})
   );
 
   // ── MAIN TABS ──
@@ -587,6 +642,17 @@ function App(){
             div({fontSize:11,color:"#a0c8e8",lineHeight:1.6},a.text),
             div({fontSize:9,color:"#3a5a6a",marginTop:1},`${fD(a.timestamp)} · ${a.author}`)
           ))
+        ),
+        dutyReminder && div({background:"linear-gradient(135deg,#1a1a08,#2a2a10)",border:"2px solid #cdcd6a",borderRadius:10,padding:"11px 14px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between"},
+          div({},
+            div({fontSize:9,color:"#cdcd6a",letterSpacing:2,textTransform:"uppercase",marginBottom:2},"⏰ DUTY REMINDER"),
+            div({fontSize:13,fontWeight:"bold",color:"#e8e8a0"},`Your duty starts in ${dutyReminder.mins} minutes`),
+            div({fontSize:11,color:"#a0a060",marginTop:2},dutyReminder.label)
+          ),
+          div({display:"flex",flexDirection:"column",alignItems:"center",gap:4},
+            div({fontSize:24},"⏰"),
+            h("button",{onClick:()=>setDutyReminder(null),style:{fontSize:9,background:"transparent",border:"1px solid #4a4a18",color:"#6a6a28",padding:"2px 6px",borderRadius:5,cursor:"pointer",fontFamily:"Georgia,serif"}},"Dismiss")
+          )
         ),
         specEvents.filter(e=>new Date(e.event_date)>=new Date()).slice(0,1).map(e=>
           div({...S.card("#3a2a4a","linear-gradient(135deg,#120a1a,#1a0e24)"),borderLeft:`3px solid ${C.purple}`},
@@ -841,8 +907,8 @@ function App(){
 
       // ── MONTHLY ──
       tab==="monthly"&&isAdmin&&(()=>{
-        const [sy,setSy]=useState(new Date().getFullYear());
-        const [sm,setSm]=useState(new Date().getMonth());
+        const sy=monthlySy, setSy=setMonthlySy;
+        const sm=monthlySm, setSm=setMonthlySm;
         const sundays=Object.values(QUARTERS).flatMap(q=>q.months.flatMap(m=>m.sundays)).filter(s=>s.m===sm&&s.yr===sy);
         return div({},
           div({display:"flex",gap:8,marginBottom:12},
@@ -1009,8 +1075,9 @@ function App(){
       )
     ),
 
-    div({textAlign:"center",padding:8,fontSize:9,color:"#1a1810",borderTop:"1px solid #161410"},
-      '"Unless the LORD watches over the city, the watchmen stand guard in vain." — Psalm 127:1'
+    div({textAlign:"center",padding:"10px 8px 14px",fontSize:9,borderTop:"1px solid #161410"},
+      div({color:"#1a1810",marginBottom:4},'"Unless the LORD watches over the city, the watchmen stand guard in vain." — Psalm 127:1'),
+      div({color:"#2a2010",fontSize:8,letterSpacing:1},"Built by Obaoye Samuel · Adullam Systems · LSC Abuja Safety Unit")
     )
   ); // end App return
 } // end App
