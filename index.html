@@ -687,8 +687,7 @@ function App(){
           const ab=absences[member.id];
           return div({...S.card(isIn?"#3a6a2a":C.bor,isIn?"linear-gradient(135deg,#0f2a0f,#1a3a10)":C.sur)},
             div({display:"flex",alignItems:"center",justifyContent:"space-between"},
-              div({display:"flex",alignItems:"center",gap:9,flex:1,cursor:"pointer"},
-                {onClick:()=>setProfileModal(member)},
+              div({display:"flex",alignItems:"center",gap:9,flex:1,cursor:"pointer",onClick:()=>setProfileModal(member)},
                 div({width:30,height:30,borderRadius:"50%",background:isIn?"#2a5a2a":"#1e1c14",border:`1px solid ${isIn?"#4a8a4a":"#282420"}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:isIn?C.green:C.mut},member.id),
                 div({},
                   div({fontSize:12,fontWeight:"bold",color:isIn?"#c0e8a0":C.txt},member.name),
