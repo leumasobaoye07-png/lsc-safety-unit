@@ -303,6 +303,7 @@ function App(){
   const [settingsModal,setSettingsModal]=useState(false);
   const [profilePics,setProfilePics]=useState({});
   const [notifEnabled,setNotifEnabled]=useState(false);
+  const notifEnabledRef = useRef(false);
   const [customPosts,setCustomPosts]=useState([]);
   const [newPost,setNewPost]=useState({label:"",time:"",icon:"🔒"});
   const [monthlySy,setMonthlySy]=useState(new Date().getFullYear());
@@ -317,7 +318,7 @@ function App(){
       const saved=localStorage.getItem('lsc_profile_pics');
       if(saved) setProfilePics(JSON.parse(saved));
       const notif=localStorage.getItem('lsc_notif');
-      if(notif==='true') setNotifEnabled(true);
+      if(notif==='true'){ setNotifEnabled(true); notifEnabledRef.current=true; }
     }catch(e){}
     const t=setInterval(()=>{
       setNow(new Date());
@@ -366,7 +367,12 @@ function App(){
     },1000);
     const n=new Date();const qMap={0:"Q1",1:"Q1",2:"Q1",3:"Q2",4:"Q2",5:"Q2",6:"Q3",7:"Q3",8:"Q3",9:"Q4",10:"Q4",11:"Q4"};
     const qk=`${qMap[n.getMonth()]}-${n.getFullYear()}`;if(QUARTERS[qk]){setRQ(qk);setRM(0);}
-    return()=>{clearInterval(t);if(emTimer.current)clearTimeout(emTimer.current);};
+    return()=>{
+      clearInterval(t);
+      if(emTimer.current) clearTimeout(emTimer.current);
+      if(wsRetry.current) clearTimeout(wsRetry.current);
+      if(wsRef.current) wsRef.current.close();
+    };
   },[]);
 
   useEffect(()=>{if(msgEnd.current)msgEnd.current.scrollIntoView({behavior:"smooth"});},[msgs]);
@@ -377,6 +383,7 @@ function App(){
       if(Array.isArray(data)&&data.length>0){
         setMembers(data);
         await loadData();
+        startRealtime();
       }
     }catch(e){console.error(e);}
     setLoading(false);
@@ -616,6 +623,96 @@ function App(){
     } catch(e) {
       alert('PDF export failed: ' + e.message);
     }
+  }
+
+  function startRealtime(){
+    // Connect to Supabase Realtime via WebSocket
+    function connect(){
+      try{
+        const wsUrl = SURL.replace("https://","wss://").replace("http://","ws://")
+          + "/realtime/v1/websocket?apikey=" + SKEY + "&vsn=1.0.0";
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          // Subscribe to all tables we care about
+          ["messages","emergency_alerts","announcements","clock_events","cover_requests"].forEach((table,i) => {
+            setTimeout(()=>{
+              ws.send(JSON.stringify({
+                topic: "realtime:public:" + table,
+                event: "phx_join",
+                payload: {config:{broadcast:{self:false},presence:{key:""}}},
+                ref: String(i+1)
+              }));
+            }, i * 100);
+          });
+        };
+
+        ws.onmessage = (e) => {
+          try{
+            const msg = JSON.parse(e.data);
+            if(!msg.payload?.record) return;
+            const rec = msg.payload.record;
+            const table = msg.topic?.split(":")?.[2];
+
+            if(table === "messages" && msg.event === "INSERT"){
+              setMsgs(prev => {
+                if(prev.find(m=>m.id===rec.id)) return prev;
+                // Notify if not from me
+                if(rec.sender_id !== user?.id){
+                  if(notifEnabledRef.current){
+                    try{ new Notification("💬 " + rec.sender_name, {body: rec.text?.slice(0,80), icon:"/apple-touch-icon.png"}); }catch(_){}
+                  }
+                }
+                return [...prev, rec];
+              });
+            }
+
+            if(table === "emergency_alerts" && msg.event === "INSERT"){
+              setEmergency(rec);
+              playAlarm();
+              if(notifEnabledRef.current){
+                try{ new Notification("🚨 EMERGENCY ALERT — LSC Safety Unit", {body: rec.message, icon:"/apple-touch-icon.png", requireInteraction: true}); }catch(_){}
+              }
+            }
+
+            if(table === "emergency_alerts" && msg.event === "UPDATE"){
+              if(!rec.active){ setEmergency(null); stopAlarm(); }
+            }
+
+            if(table === "announcements" && msg.event === "INSERT"){
+              setAnnouncements(prev => prev.find(a=>a.id===rec.id) ? prev : [rec,...prev]);
+              if(notifEnabledRef.current){
+                try{ new Notification("📢 New Notice — LSC Safety Unit", {body: rec.text?.slice(0,80), icon:"/apple-touch-icon.png"}); }catch(_){}
+              }
+            }
+
+            if(table === "clock_events" && msg.event === "INSERT"){
+              if(rec.action === "Clock In") setClockedIn(prev => ({...prev, [rec.member_id]: rec}));
+              if(rec.action === "Clock Out") setClockedIn(prev => { const c={...prev}; delete c[rec.member_id]; return c; });
+            }
+
+            if(table === "cover_requests" && msg.event === "INSERT"){
+              setCoverReqs(prev => prev.find(r=>r.id===rec.id) ? prev : [rec,...prev]);
+            }
+            if(table === "cover_requests" && msg.event === "UPDATE"){
+              setCoverReqs(prev => prev.map(r=>r.id===rec.id?rec:r));
+            }
+
+          }catch(err){ console.error("Realtime parse error:", err); }
+        };
+
+        ws.onclose = () => {
+          // Reconnect after 3 seconds
+          if(wsRetry.current) clearTimeout(wsRetry.current);
+          wsRetry.current = setTimeout(connect, 3000);
+        };
+
+        ws.onerror = () => { ws.close(); };
+
+      }catch(err){ console.error("Realtime connect error:", err); }
+    }
+    connect();
   }
 
   function buildReport(){
@@ -1305,12 +1402,14 @@ function App(){
               const perm=await Notification.requestPermission();
               if(perm==="granted"){
                 setNotifEnabled(true);
+                notifEnabledRef.current=true;
                 try{localStorage.setItem('lsc_notif','true');}catch(e){}
               } else {
                 alert("Please allow notifications in your browser settings.");
               }
             } else {
               setNotifEnabled(false);
+              notifEnabledRef.current=false;
               try{localStorage.setItem('lsc_notif','false');}catch(e){}
             }
           },style:{...S.smBtn(notifEnabled?C.red:C.green,notifEnabled?"#2a1a1a":"#0f2a0f",notifEnabled?"#4a2a2a":"#3a8a3a"),padding:"8px 16px",fontWeight:"bold"}},notifEnabled?"Turn Off":"Turn On")
