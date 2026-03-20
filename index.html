@@ -297,6 +297,7 @@ function App(){
   const [emMsg,setEmMsg]=useState("");
   const [evForm,setEvForm]=useState({title:"",date:"",time:"",description:"",assigned:[]});
   const [coverReason,setCoverReason]=useState("");
+  const [coverDutyEntry,setCoverDutyEntry]=useState(null);
   const [newMember,setNewMember]=useState({name:"",pin:""});
   const [newMemberMsg,setNewMemberMsg]=useState("");
   const [dutyPostModal,setDutyPostModal]=useState(false);
@@ -384,6 +385,7 @@ function App(){
         setMembers(data);
         await loadData();
         startRealtime();
+        startPolling();
       }
     }catch(e){console.error(e);}
     setLoading(false);
@@ -522,11 +524,18 @@ function App(){
     setIncForm({reporter:"",location:"",type:"",description:""});
   }
   async function submitCover(){
-    const todayEntry=findToday();
-    const duties=todayEntry?myDuties(user.id,todayEntry):[];
-    const res=await dbInsert("cover_requests",{requester_id:user.id,requester_name:user.name,duty_date:todayEntry?.date||"TBD",role_label:duties[0]?.label||"Duty",reason:coverReason,status:"open"});
+    const entry = coverDutyEntry || findToday();
+    const duties = entry ? myDuties(user.id, entry) : [];
+    const res = await dbInsert("cover_requests",{
+      requester_id:user.id,
+      requester_name:user.name,
+      duty_date:entry?.date||"TBD",
+      role_label:duties.map(d=>d.label).join(" & ")||"Duty",
+      reason:coverReason,
+      status:"open"
+    });
     if(Array.isArray(res)&&res[0]) setCoverReqs(prev=>[res[0],...prev]);
-    setCoverModal(false);setCoverReason("");
+    setCoverModal(false);setCoverReason("");setCoverDutyEntry(null);
   }
   async function scheduleEvent(){
     if(!evForm.title||!evForm.date) return;
@@ -625,6 +634,35 @@ function App(){
     }
   }
 
+  function startPolling(){
+    // Poll every 15 seconds as fallback for missed realtime events
+    setInterval(async()=>{
+      try{
+        // Check for new messages
+        const lastMsg = msgs[msgs.length-1];
+        const newMsgs = await dbSelect("messages",{order:"timestamp.asc",limit:200});
+        if(Array.isArray(newMsgs) && newMsgs.length > (msgs?.length||0)){
+          setMsgs(newMsgs);
+        }
+        // Check for active emergency
+        const em = await dbSelect("emergency_alerts",{filter:"active=eq.true",order:"timestamp.desc",limit:1});
+        if(Array.isArray(em) && em.length > 0 && !emergency){
+          setEmergency(em[0]);
+          playAlarm();
+        }
+        // Refresh clock-ins
+        const today=new Date();today.setHours(0,0,0,0);
+        const ce=await dbSelect("clock_events",{order:"timestamp.desc",limit:200});
+        if(Array.isArray(ce)){
+          const todayEv=ce.filter(e=>new Date(e.timestamp)>=today);
+          const ci={};
+          todayEv.forEach(e=>{if(e.action==="Clock In")ci[e.member_id]=e;if(e.action==="Clock Out")delete ci[e.member_id];});
+          setClockedIn(ci);
+        }
+      }catch(e){}
+    }, 15000);
+  }
+
   function startRealtime(){
     // Connect to Supabase Realtime via WebSocket
     function connect(){
@@ -641,11 +679,21 @@ function App(){
               ws.send(JSON.stringify({
                 topic: "realtime:public:" + table,
                 event: "phx_join",
-                payload: {config:{broadcast:{self:false},presence:{key:""}}},
+                payload: {
+                  config:{
+                    broadcast:{self:false},
+                    presence:{key:""},
+                    postgres_changes:[{event:"*",schema:"public",table:table}]
+                  }
+                },
                 ref: String(i+1)
               }));
-            }, i * 100);
+            }, i * 200);
           });
+          // Send heartbeat every 30s to keep connection alive
+          setInterval(()=>{
+            if(ws.readyState===1) ws.send(JSON.stringify({topic:"phoenix",event:"heartbeat",payload:{},ref:"hb"}));
+          }, 30000);
         };
 
         ws.onmessage = (e) => {
@@ -932,7 +980,26 @@ function App(){
         div({display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginTop:6},
           h("button",{onClick:()=>setProfileModal(user),style:{...S.smBtn(C.mut),padding:9,width:"100%"}},"👤 My Profile"),
           h("button",{onClick:()=>setPinModal(true),style:{...S.smBtn(C.mut),padding:9,width:"100%"}},"🔒 Change PIN"),
-          !iAmIn&&todayEntry&&myDuties(user.id,todayEntry).length>0&&h("button",{onClick:()=>setCoverModal(true),style:{...S.smBtn(C.purple,"#120a18","#3a2a4a"),padding:9,width:"100%",gridColumn:"span 2"}},"🔄 Request Cover"),
+          (()=>{
+          // Find next upcoming duty for this member (within 14 days, more than 24hrs away)
+          const nowMs = Date.now();
+          const allSundays = Object.values(QUARTERS).flatMap(q=>q.months.flatMap(mo=>mo.sundays));
+          const upcomingDuty = allSundays.find(s=>{
+            const dutyDate = new Date(s.yr, s.m, s.d);
+            const diffMs = dutyDate.getTime() - nowMs;
+            const diffHrs = diffMs / (1000*60*60);
+            const hasDuty = myDuties(user.id, s).length > 0;
+            const withinWindow = diffHrs > 24 && diffHrs <= 14*24;
+            const notAlreadyRequested = !coverReqs.find(r=>r.requester_id===user.id&&r.duty_date===s.date&&r.status==="open");
+            return hasDuty && withinWindow && notAlreadyRequested;
+          });
+          return upcomingDuty ? h("button",{onClick:()=>{
+            setCoverModal(true);
+            setCoverDutyEntry(upcomingDuty);
+          },style:{...S.smBtn(C.purple,"#120a18","#3a2a4a"),padding:9,width:"100%",gridColumn:"span 2"}},
+            "🔄 Request Cover — "+upcomingDuty.date
+          ) : null;
+        })(),
           isAdmin&&isSunday()&&h("button",{onClick:()=>{buildReport();setTab("report");},style:{...S.bigBtn(C.gold,"#1e1608"),gridColumn:"span 2"}},"📊 Generate Duty Report")
         )
       ),
