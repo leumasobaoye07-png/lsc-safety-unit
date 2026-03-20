@@ -299,6 +299,9 @@ function App(){
   const [coverReason,setCoverReason]=useState("");
   const [newMember,setNewMember]=useState({name:"",pin:""});
   const [newMemberMsg,setNewMemberMsg]=useState("");
+  const [dutyPostModal,setDutyPostModal]=useState(false);
+  const [customPosts,setCustomPosts]=useState([]);
+  const [newPost,setNewPost]=useState({label:"",time:"",icon:"🔒"});
   const [monthlySy,setMonthlySy]=useState(new Date().getFullYear());
   const [monthlySm,setMonthlySm]=useState(new Date().getMonth());
   const [dutyReminder,setDutyReminder]=useState(null);
@@ -410,21 +413,35 @@ function App(){
     setSeeding(false);
   }
 
+  const alarmInterval = useRef(null);
+
+  function stopAlarm(){
+    if(alarmInterval.current){ clearInterval(alarmInterval.current); alarmInterval.current=null; }
+    if(!isIOS()&&navigator.vibrate) navigator.vibrate(0);
+  }
+
   function playAlarm(){
-    try{
-      if(!audioCtx.current) audioCtx.current=new(window.AudioContext||window.webkitAudioContext)();
-      const ctx=audioCtx.current;
-      [0,.3,.6,.9,1.2,1.5].forEach(t=>{
-        const o=ctx.createOscillator(),g=ctx.createGain();
-        o.connect(g);g.connect(ctx.destination);
-        o.type="square";o.frequency.setValueAtTime(1040,ctx.currentTime+t);
-        o.frequency.setValueAtTime(700,ctx.currentTime+t+.15);
-        g.gain.setValueAtTime(.5,ctx.currentTime+t);
-        g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+t+.28);
-        o.start(ctx.currentTime+t);o.stop(ctx.currentTime+t+.3);
-      });
-    }catch(e){}
-    if(!isIOS()&&navigator.vibrate) navigator.vibrate([400,100,400,100,400,100,600]);
+    // Stop any existing alarm first
+    stopAlarm();
+    // Play immediately then repeat every 3 seconds until dismissed
+    function burst(){
+      try{
+        if(!audioCtx.current) audioCtx.current=new(window.AudioContext||window.webkitAudioContext)();
+        const ctx=audioCtx.current;
+        [0,.25,.5,.75,1.0].forEach(t=>{
+          const o=ctx.createOscillator(),g=ctx.createGain();
+          o.connect(g);g.connect(ctx.destination);
+          o.type="square";o.frequency.setValueAtTime(1200,ctx.currentTime+t);
+          o.frequency.setValueAtTime(600,ctx.currentTime+t+.12);
+          g.gain.setValueAtTime(.6,ctx.currentTime+t);
+          g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+t+.22);
+          o.start(ctx.currentTime+t);o.stop(ctx.currentTime+t+.25);
+        });
+      }catch(e){}
+      if(!isIOS()&&navigator.vibrate) navigator.vibrate([500,100,500,100,500,100,800]);
+    }
+    burst();
+    alarmInterval.current = setInterval(burst, 3000);
   }
 
   async function doClockIn(memberId,roleId){
@@ -446,6 +463,11 @@ function App(){
     if(Array.isArray(res)&&res[0]) setMsgs(prev=>[...prev,res[0]]);
     setMsgText("");
   }
+  function notify(title, body){
+    if(typeof Notification!=="undefined"&&Notification.permission==="granted"){
+      new Notification(title,{body,icon:"/apple-touch-icon.png",badge:"/apple-touch-icon.png"});
+    }
+  }
   async function fireEmergency(){
     if(!emMsg.trim()) return;
     playAlarm();
@@ -456,6 +478,7 @@ function App(){
     setEmModal(false);setEmMsg("");
   }
   async function dismissEmergency(){
+    stopAlarm();
     if(emergency?.id) await dbUpdate("emergency_alerts",{active:false},`id=eq.${emergency.id}`);
     setEmergency(null);
   }
@@ -472,6 +495,7 @@ function App(){
     if(!noticeText.trim()) return;
     const res=await dbInsert("announcements",{text:noticeText.trim(),author:user.name});
     if(Array.isArray(res)&&res[0]) setAnnouncements(prev=>[res[0],...prev]);
+    notify("📢 New Notice — LSC Safety Unit", noticeText.trim().slice(0,80));
     setNoticeText("");setNoticeModal(false);
   }
   async function submitInc(){
@@ -501,6 +525,7 @@ function App(){
     if(Array.isArray(res)&&res[0]){
       setMembers(prev=>[...prev,res[0]]);
       setNewMemberMsg("✓ Member added!");
+      notify("👤 New Member Added",""+newMember.name.trim()+" has been added to the team.");
       setTimeout(()=>{setAddMemberModal(false);setNewMember({name:"",pin:""});setNewMemberMsg("");},1200);
     } else {setNewMemberMsg("Error — try a different name/ID");}
   }
@@ -696,7 +721,7 @@ function App(){
         div({fontSize:21,fontWeight:"bold",color:"#ffaaaa",marginBottom:8},emergency.message),
         div({fontSize:14,color:"#aa4444",marginBottom:16},`Raised by ${emergency.raised_by} · ${fT(emergency.timestamp)}`),
         div({fontSize:16,color:"#ff8888",fontWeight:"bold",marginBottom:18},"ALL TEAM — CONVERGE NOW"),
-        isAdmin&&h("button",{onClick:dismissEmergency,style:{background:"#2a0000",border:"1px solid #ff4444",color:"#ff6666",padding:"9px 22px",borderRadius:9,cursor:"pointer",fontFamily:"Georgia,serif",fontSize:15}},"Dismiss Alert")
+        h("button",{onClick:dismissEmergency,style:{background:"#2a0000",border:"1px solid #ff4444",color:"#ff6666",padding:"9px 22px",borderRadius:9,cursor:"pointer",fontFamily:"Georgia,serif",fontSize:15}},"Dismiss Alert")
       )
     ),
 
@@ -711,7 +736,7 @@ function App(){
         div({textAlign:"right"},
           div({fontSize:18,fontWeight:"bold",color:C.gold,fontFamily:"monospace"},now.toLocaleTimeString("en-NG",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:true})),
           div({display:"flex",gap:5,justifyContent:"flex-end",marginTop:2},
-            isAdmin&&h("button",{onClick:()=>setEmModal(true),style:{background:"#2a0808",border:"1px solid #8a2828",color:C.red,fontSize:12,padding:"4px 10px",borderRadius:9,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:"bold"}},"🚨 ALERT"),
+            h("button",{onClick:()=>setEmModal(true),style:{background:"#2a0808",border:"1px solid #8a2828",color:C.red,fontSize:12,padding:"4px 10px",borderRadius:9,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:"bold"}},"🚨 ALERT"),
             h("button",{onClick:()=>{setUser(null);setTab("home");},style:{background:"#2a1a1a",border:"1px solid #4a2a2a",color:C.red,fontSize:12,padding:"4px 9px",borderRadius:9,cursor:"pointer",fontFamily:"Georgia,serif"}},"Logout")
           ),
           div({fontSize:12,color:isAdmin?C.gold:C.mut,marginTop:1},`${user.name}${isAdmin?" · Admin":""}`)
@@ -995,17 +1020,26 @@ function App(){
           })
         ),
         h("button",{onClick:()=>setAddMemberModal(true),style:{...S.bigBtn(C.green,"#0f2a0f","#3a8a3a"),marginBottom:8}},"+ Add New Member"),
+        h("button",{onClick:()=>setDutyPostModal(true),style:{...S.bigBtn(C.blue,"#0a1218","#1a3a5a"),marginBottom:8}},"+ Add New Duty Post"),
         h("button",{onClick:()=>setEvModal(true),style:{...S.bigBtn(C.purple,"#120a1a","#5a3a8a"),marginBottom:8}},"🗓 Schedule Special Programme"),
         h("button",{onClick:()=>setNoticeModal(true),style:{...S.bigBtn(C.blue,"#0a1218","#1a3a5a"),marginBottom:8}},"📢 Post Notice to All Members"),
         div({...S.card(C.bor,"#1a1508"),marginTop:16},
           div({fontSize:14,fontWeight:"bold",color:C.gold,marginBottom:8},"All Team Members"),
-          ...allMembersList.map(m=>div({display:"flex",alignItems:"center",gap:9,padding:"7px 0",borderBottom:"1px solid #1a1810"},
-            div({width:28,height:28,borderRadius:"50%",background:"#1e1c14",border:`1px solid #282420`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:C.mut,flexShrink:0},m.id),
+          ...allMembersList.map(m=>div({display:"flex",alignItems:"center",gap:9,padding:"9px 0",borderBottom:"1px solid #1a1810"},
+            div({width:30,height:30,borderRadius:"50%",background:"#1e1c14",border:`1px solid #282420`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:C.mut,flexShrink:0},m.id),
             div({flex:1},
-              div({fontSize:15,color:C.txt},m.name),
-              div({fontSize:12,color:C.dim},m.role==="admin"?"Administrator":"Member")
+              div({fontSize:14,color:C.txt},m.name),
+              div({fontSize:12,color:m.role==="admin"?C.gold:C.dim},m.role==="admin"?"Administrator":"Member")
             ),
-            !!clockedIn[m.id]&&div({...S.tag(C.green)},"On Duty")
+            div({display:"flex",gap:6,alignItems:"center"},
+              !!clockedIn[m.id]&&div({...S.tag(C.green),fontSize:11},"On Duty"),
+              m.id!==user.id&&h("button",{onClick:async()=>{
+                const newRole=m.role==="admin"?"member":"admin";
+                await dbUpdate("members",{role:newRole},`id=eq.${m.id}`);
+                setMembers(prev=>prev.map(x=>x.id===m.id?{...x,role:newRole}:x));
+                notify("⚙️ Role Updated",""+m.name+" is now "+(newRole==="admin"?"an Administrator":"a Member")+".");
+              },style:{...S.smBtn(m.role==="admin"?C.amber:C.gold,m.role==="admin"?"#1a1a08":"#1e1608",m.role==="admin"?"#4a4a18":C.gold),fontSize:11,padding:"4px 9px"}},m.role==="admin"?"Demote":"Make Admin")
+            )
           ))
         ),
         specEvents.length>0&&div({marginTop:16},
@@ -1155,6 +1189,27 @@ function App(){
       )
     ),
 
+    dutyPostModal&&h(Modal,{onClose:()=>setDutyPostModal(false)},
+      div({fontSize:11,color:C.blue,textTransform:"uppercase",letterSpacing:2,marginBottom:12},"Add New Duty Post"),
+      div({marginBottom:9},h("label",{style:S.label()},"Post Name"),inp(newPost.label,v=>setNewPost(p=>({...p,label:v})),"e.g. Prayer Coordinator")),
+      div({marginBottom:9},h("label",{style:S.label()},"Time / Description"),inp(newPost.time,v=>setNewPost(p=>({...p,time:v})),"e.g. 8:00 AM – End of Service")),
+      div({marginBottom:13},
+        h("label",{style:S.label()},"Icon"),
+        div({display:"flex",flexWrap:"wrap",gap:6},
+          ...["🔒","🚶","📋","🔦","🎙️","🚑","🧯","📡","🏃","⛪"].map(ic=>
+            h("button",{onClick:()=>setNewPost(p=>({...p,icon:ic})),style:{fontSize:20,background:newPost.icon===ic?"#1e1608":"transparent",border:`1px solid ${newPost.icon===ic?C.gold:C.bor}`,borderRadius:7,padding:"4px 8px",cursor:"pointer"}},ic)
+          )
+        )
+      ),
+      div({display:"grid",gridTemplateColumns:"1fr 1fr",gap:8},
+        h("button",{onClick:()=>setDutyPostModal(false),style:S.smBtn(C.mut,C.sur,C.bor)},"Cancel"),
+        h("button",{onClick:()=>{
+          if(!newPost.label.trim()) return;
+          setCustomPosts(prev=>[...prev,{id:"custom_"+Date.now(),label:newPost.label,time:newPost.time,icon:newPost.icon,col:C.blue}]);
+          setDutyPostModal(false);setNewPost({label:"",time:"",icon:"🔒"});
+        },style:S.smBtn(C.blue,"#0a1218","#1a3a5a")},"+ Add Post")
+      )
+    ),
     addMemberModal&&h(Modal,{onClose:()=>setAddMemberModal(false)},
       div({fontSize:12,color:C.green,textTransform:"uppercase",letterSpacing:2,marginBottom:12},"Add New Team Member"),
       div({marginBottom:9},h("label",{style:S.label()},"Full Name"),inp(newMember.name,v=>setNewMember(p=>({...p,name:v})),"e.g. Emmanuel Okafor")),
