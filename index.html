@@ -300,6 +300,9 @@ function App(){
   const [newMember,setNewMember]=useState({name:"",pin:""});
   const [newMemberMsg,setNewMemberMsg]=useState("");
   const [dutyPostModal,setDutyPostModal]=useState(false);
+  const [settingsModal,setSettingsModal]=useState(false);
+  const [profilePics,setProfilePics]=useState({});
+  const [notifEnabled,setNotifEnabled]=useState(false);
   const [customPosts,setCustomPosts]=useState([]);
   const [newPost,setNewPost]=useState({label:"",time:"",icon:"🔒"});
   const [monthlySy,setMonthlySy]=useState(new Date().getFullYear());
@@ -309,6 +312,13 @@ function App(){
 
   useEffect(()=>{
     init();
+    // Load saved profile pics and notification setting
+    try{
+      const saved=localStorage.getItem('lsc_profile_pics');
+      if(saved) setProfilePics(JSON.parse(saved));
+      const notif=localStorage.getItem('lsc_notif');
+      if(notif==='true') setNotifEnabled(true);
+    }catch(e){}
     const t=setInterval(()=>{
       setNow(new Date());
       // Duty reminder check - every minute on Sundays
@@ -686,7 +696,9 @@ function App(){
           h("button",{key:m.id,onClick:()=>{setSelMember(m);setStep("pin");},
             style:{background:m.role==="admin"?"linear-gradient(135deg,#1a1508,#1e1a08)":C.sur,border:`1px solid ${m.role==="admin"?"#4a3a18":C.bor}`,borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer"}},
             div({display:"flex",alignItems:"center",gap:10},
-              div({width:33,height:33,borderRadius:"50%",background:m.role==="admin"?"#2a1f08":"#1e1c14",border:`1px solid ${m.role==="admin"?"#4a3a18":"#2a2820"}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:"bold",color:m.role==="admin"?C.gold:C.mut},m.id),
+              profilePics[m.id]
+                ? h("img",{src:profilePics[m.id],style:{width:33,height:33,borderRadius:"50%",objectFit:"cover",border:`1px solid ${m.role==="admin"?"#4a3a18":"#2a2820"}`}})
+                : div({width:33,height:33,borderRadius:"50%",background:m.role==="admin"?"#2a1f08":"#1e1c14",border:`1px solid ${m.role==="admin"?"#4a3a18":"#2a2820"}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:"bold",color:m.role==="admin"?C.gold:C.mut},m.id),
               div({fontSize:16,fontWeight:"bold",color:m.role==="admin"?"#e8d8a0":C.txt},m.name),
             ),
             m.role==="admin"&&div({fontSize:12,background:"#2a1f08",border:"1px solid #4a3a18",color:C.gold,padding:"4px 10px",borderRadius:10,letterSpacing:1},"ADMIN")
@@ -737,9 +749,15 @@ function App(){
           div({fontSize:18,fontWeight:"bold",color:C.gold,fontFamily:"monospace"},now.toLocaleTimeString("en-NG",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:true})),
           div({display:"flex",gap:5,justifyContent:"flex-end",marginTop:2},
             h("button",{onClick:()=>setEmModal(true),style:{background:"#2a0808",border:"1px solid #8a2828",color:C.red,fontSize:12,padding:"4px 10px",borderRadius:9,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:"bold"}},"🚨 ALERT"),
+            h("button",{onClick:()=>setSettingsModal(true),style:{background:"#1a1818",border:"1px solid #2a2828",color:C.mut,fontSize:12,padding:"4px 9px",borderRadius:9,cursor:"pointer",fontFamily:"Georgia,serif"}},"⚙️"),
             h("button",{onClick:()=>{setUser(null);setTab("home");},style:{background:"#2a1a1a",border:"1px solid #4a2a2a",color:C.red,fontSize:12,padding:"4px 9px",borderRadius:9,cursor:"pointer",fontFamily:"Georgia,serif"}},"Logout")
           ),
-          div({fontSize:12,color:isAdmin?C.gold:C.mut,marginTop:1},`${user.name}${isAdmin?" · Admin":""}`)
+          div({display:"flex",alignItems:"center",gap:5,justifyContent:"flex-end",marginTop:1},
+            profilePics[user.id]
+              ? h("img",{src:profilePics[user.id],style:{width:22,height:22,borderRadius:"50%",objectFit:"cover",border:`1px solid ${isAdmin?C.gold:C.bor}`}})
+              : null,
+            div({fontSize:12,color:isAdmin?C.gold:C.mut},`${user.name}${isAdmin?" · Admin":""}`)
+          )
         )
       )
     ),
@@ -1238,6 +1256,75 @@ function App(){
       h("button",{onClick:()=>setProfileModal(null),style:{...S.bigBtn(C.mut,C.sur,C.bor),marginTop:8}},"Close")
     ),
 
+    settingsModal&&h(Modal,{onClose:()=>setSettingsModal(false)},
+      div({fontSize:11,color:C.gold,textTransform:"uppercase",letterSpacing:2,marginBottom:16},"⚙️ Settings"),
+
+      // Profile Picture
+      div({...S.card(C.bor,C.sur2),marginBottom:12},
+        div({fontSize:13,fontWeight:"bold",color:C.txt,marginBottom:10},"Profile Picture"),
+        div({display:"flex",alignItems:"center",gap:14},
+          profilePics[user.id]
+            ? h("img",{src:profilePics[user.id],style:{width:60,height:60,borderRadius:"50%",objectFit:"cover",border:`2px solid ${C.gold}`}})
+            : div({width:60,height:60,borderRadius:"50%",background:"#1e1c14",border:`2px solid ${C.bor}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,color:C.mut},user.id),
+          div({},
+            div({fontSize:12,color:C.mut,marginBottom:8},"Your photo appears on the login screen"),
+            div({display:"flex",gap:7},
+              h("label",{style:{...S.smBtn(C.gold,"#1e1608",C.gold),cursor:"pointer",display:"inline-block"}},
+                "📷 Upload Photo",
+                h("input",{type:"file",accept:"image/*",style:{display:"none"},onChange:e=>{
+                  const file=e.target.files[0];
+                  if(!file) return;
+                  const reader=new FileReader();
+                  reader.onload=ev=>{
+                    const newPics={...profilePics,[user.id]:ev.target.result};
+                    setProfilePics(newPics);
+                    try{localStorage.setItem('lsc_profile_pics',JSON.stringify(newPics));}catch(err){}
+                  };
+                  reader.readAsDataURL(file);
+                }})
+              ),
+              profilePics[user.id]&&h("button",{onClick:()=>{
+                const newPics={...profilePics};
+                delete newPics[user.id];
+                setProfilePics(newPics);
+                try{localStorage.setItem('lsc_profile_pics',JSON.stringify(newPics));}catch(err){}
+              },style:S.smBtn(C.red,"#2a1a1a","#4a2a2a")},"Remove")
+            )
+          )
+        )
+      ),
+
+      // Notifications
+      div({...S.card(C.bor,C.sur2),marginBottom:12},
+        div({fontSize:13,fontWeight:"bold",color:C.txt,marginBottom:6},"Notifications"),
+        div({fontSize:12,color:C.mut,marginBottom:10},"Get alerts for messages, announcements and emergencies"),
+        div({display:"flex",alignItems:"center",justifyContent:"space-between"},
+          div({fontSize:13,color:notifEnabled?C.green:C.mut},notifEnabled?"Notifications ON":"Notifications OFF"),
+          h("button",{onClick:async()=>{
+            if(!notifEnabled){
+              const perm=await Notification.requestPermission();
+              if(perm==="granted"){
+                setNotifEnabled(true);
+                try{localStorage.setItem('lsc_notif','true');}catch(e){}
+              } else {
+                alert("Please allow notifications in your browser settings.");
+              }
+            } else {
+              setNotifEnabled(false);
+              try{localStorage.setItem('lsc_notif','false');}catch(e){}
+            }
+          },style:{...S.smBtn(notifEnabled?C.red:C.green,notifEnabled?"#2a1a1a":"#0f2a0f",notifEnabled?"#4a2a2a":"#3a8a3a"),padding:"8px 16px",fontWeight:"bold"}},notifEnabled?"Turn Off":"Turn On")
+        )
+      ),
+
+      // Change PIN shortcut
+      div({...S.card(C.bor,C.sur2),marginBottom:12},
+        div({fontSize:13,fontWeight:"bold",color:C.txt,marginBottom:6},"Security"),
+        h("button",{onClick:()=>{setSettingsModal(false);setPinModal(true);},style:{...S.bigBtn(C.mut,C.sur,C.bor)}},"🔒 Change My PIN")
+      ),
+
+      h("button",{onClick:()=>setSettingsModal(false),style:{...S.bigBtn(C.gold,"#1e1608"),marginTop:4}},"Done")
+    ),
     coverModal&&h(Modal,{onClose:()=>setCoverModal(false)},
       div({fontSize:12,color:C.purple,textTransform:"uppercase",letterSpacing:2,marginBottom:12},"Request Cover"),
       div({fontSize:18,fontWeight:"bold",color:C.gold,marginBottom:12},user.name),
