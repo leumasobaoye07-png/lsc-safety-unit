@@ -274,6 +274,7 @@ function App(){
   const msgEnd=useRef(null);
   const audioCtx=useRef(null);
   const emTimer=useRef(null);
+  const userRef=useRef(null);
 
   // Modals
   const [clockModal,setClockModal]=useState(false);
@@ -297,7 +298,6 @@ function App(){
   const [emMsg,setEmMsg]=useState("");
   const [evForm,setEvForm]=useState({title:"",date:"",time:"",description:"",assigned:[]});
   const [coverReason,setCoverReason]=useState("");
-  const [coverDutyEntry,setCoverDutyEntry]=useState(null);
   const [newMember,setNewMember]=useState({name:"",pin:""});
   const [newMemberMsg,setNewMemberMsg]=useState("");
   const [dutyPostModal,setDutyPostModal]=useState(false);
@@ -385,7 +385,6 @@ function App(){
         setMembers(data);
         await loadData();
         startRealtime();
-        startPolling();
       }
     }catch(e){console.error(e);}
     setLoading(false);
@@ -434,33 +433,45 @@ function App(){
 
   const alarmInterval = useRef(null);
 
+  // Unlock AudioContext on first user touch (required by mobile browsers)
+  function unlockAudio(){
+    try{
+      if(!audioCtx.current) audioCtx.current = new(window.AudioContext||window.webkitAudioContext)();
+      if(audioCtx.current.state === "suspended") audioCtx.current.resume();
+    }catch(e){}
+  }
+
   function stopAlarm(){
     if(alarmInterval.current){ clearInterval(alarmInterval.current); alarmInterval.current=null; }
-    if(!isIOS()&&navigator.vibrate) navigator.vibrate(0);
+    try{ if(navigator.vibrate) navigator.vibrate(0); }catch(_){}
   }
 
   function playAlarm(){
-    // Stop any existing alarm first
     stopAlarm();
-    // Play immediately then repeat every 3 seconds until dismissed
     function burst(){
       try{
         if(!audioCtx.current) audioCtx.current=new(window.AudioContext||window.webkitAudioContext)();
         const ctx=audioCtx.current;
-        [0,.25,.5,.75,1.0].forEach(t=>{
-          const o=ctx.createOscillator(),g=ctx.createGain();
-          o.connect(g);g.connect(ctx.destination);
-          o.type="square";o.frequency.setValueAtTime(1200,ctx.currentTime+t);
-          o.frequency.setValueAtTime(600,ctx.currentTime+t+.12);
-          g.gain.setValueAtTime(.6,ctx.currentTime+t);
-          g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+t+.22);
-          o.start(ctx.currentTime+t);o.stop(ctx.currentTime+t+.25);
-        });
+        // Resume if suspended (iOS/Android requirement)
+        const play = () => {
+          [0,.2,.4,.6,.8,1.0,1.2].forEach(t=>{
+            const o=ctx.createOscillator(),g=ctx.createGain();
+            o.connect(g);g.connect(ctx.destination);
+            o.type="sawtooth";
+            o.frequency.setValueAtTime(1400,ctx.currentTime+t);
+            o.frequency.exponentialRampToValueAtTime(400,ctx.currentTime+t+.18);
+            g.gain.setValueAtTime(.7,ctx.currentTime+t);
+            g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+t+.19);
+            o.start(ctx.currentTime+t);o.stop(ctx.currentTime+t+.2);
+          });
+        };
+        if(ctx.state === "suspended"){ ctx.resume().then(play); } else { play(); }
       }catch(e){}
-      if(!isIOS()&&navigator.vibrate) navigator.vibrate([500,100,500,100,500,100,800]);
+      // Vibrate on all platforms (not just non-iOS)
+      try{ if(navigator.vibrate) navigator.vibrate([600,150,600,150,600,150,1000]); }catch(_){}
     }
     burst();
-    alarmInterval.current = setInterval(burst, 3000);
+    alarmInterval.current = setInterval(burst, 2500);
   }
 
   async function doClockIn(memberId,roleId){
@@ -482,11 +493,15 @@ function App(){
     if(Array.isArray(res)&&res[0]) setMsgs(prev=>[...prev,res[0]]);
     setMsgText("");
   }
-  function notify(title, body){
-    if(typeof Notification!=="undefined"&&Notification.permission==="granted"){
-      new Notification(title,{body,icon:"/apple-touch-icon.png",badge:"/apple-touch-icon.png"});
-    }
+  function fireNotify(title, body, force=false){
+    // force=true means always fire (emergencies), false means respect toggle
+    if(typeof Notification === "undefined") return;
+    if(Notification.permission !== "granted") return;
+    if(!force && !notifEnabledRef.current) return;
+    try{ new Notification(title, {body, icon:"/apple-touch-icon.png", badge:"/apple-touch-icon.png"}); }catch(_){}
   }
+  // Keep old notify() as alias for backward compat
+  function notify(title, body){ fireNotify(title, body, false); }
   async function fireEmergency(){
     if(!emMsg.trim()) return;
     playAlarm();
@@ -524,18 +539,11 @@ function App(){
     setIncForm({reporter:"",location:"",type:"",description:""});
   }
   async function submitCover(){
-    const entry = coverDutyEntry || findToday();
-    const duties = entry ? myDuties(user.id, entry) : [];
-    const res = await dbInsert("cover_requests",{
-      requester_id:user.id,
-      requester_name:user.name,
-      duty_date:entry?.date||"TBD",
-      role_label:duties.map(d=>d.label).join(" & ")||"Duty",
-      reason:coverReason,
-      status:"open"
-    });
+    const todayEntry=findToday();
+    const duties=todayEntry?myDuties(user.id,todayEntry):[];
+    const res=await dbInsert("cover_requests",{requester_id:user.id,requester_name:user.name,duty_date:todayEntry?.date||"TBD",role_label:duties[0]?.label||"Duty",reason:coverReason,status:"open"});
     if(Array.isArray(res)&&res[0]) setCoverReqs(prev=>[res[0],...prev]);
-    setCoverModal(false);setCoverReason("");setCoverDutyEntry(null);
+    setCoverModal(false);setCoverReason("");
   }
   async function scheduleEvent(){
     if(!evForm.title||!evForm.date) return;
@@ -634,129 +642,108 @@ function App(){
     }
   }
 
-  function startPolling(){
-    // Poll every 15 seconds as fallback for missed realtime events
-    setInterval(async()=>{
-      try{
-        // Check for new messages
-        const lastMsg = msgs[msgs.length-1];
-        const newMsgs = await dbSelect("messages",{order:"timestamp.asc",limit:200});
-        if(Array.isArray(newMsgs) && newMsgs.length > (msgs?.length||0)){
-          setMsgs(newMsgs);
-        }
-        // Check for active emergency
-        const em = await dbSelect("emergency_alerts",{filter:"active=eq.true",order:"timestamp.desc",limit:1});
-        if(Array.isArray(em) && em.length > 0 && !emergency){
-          setEmergency(em[0]);
-          playAlarm();
-        }
-        // Refresh clock-ins
-        const today=new Date();today.setHours(0,0,0,0);
-        const ce=await dbSelect("clock_events",{order:"timestamp.desc",limit:200});
-        if(Array.isArray(ce)){
-          const todayEv=ce.filter(e=>new Date(e.timestamp)>=today);
-          const ci={};
-          todayEv.forEach(e=>{if(e.action==="Clock In")ci[e.member_id]=e;if(e.action==="Clock Out")delete ci[e.member_id];});
-          setClockedIn(ci);
-        }
-      }catch(e){}
-    }, 15000);
-  }
-
   function startRealtime(){
-    // Connect to Supabase Realtime via WebSocket
     function connect(){
       try{
+        // Supabase Realtime v2 correct WebSocket URL
         const wsUrl = SURL.replace("https://","wss://").replace("http://","ws://")
           + "/realtime/v1/websocket?apikey=" + SKEY + "&vsn=1.0.0";
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
+        let heartbeat = null;
 
         ws.onopen = () => {
-          // Subscribe to all tables we care about
-          ["messages","emergency_alerts","announcements","clock_events","cover_requests"].forEach((table,i) => {
-            setTimeout(()=>{
-              ws.send(JSON.stringify({
-                topic: "realtime:public:" + table,
-                event: "phx_join",
-                payload: {
-                  config:{
-                    broadcast:{self:false},
-                    presence:{key:""},
-                    postgres_changes:[{event:"*",schema:"public",table:table}]
-                  }
-                },
-                ref: String(i+1)
-              }));
-            }, i * 200);
-          });
-          // Send heartbeat every 30s to keep connection alive
-          setInterval(()=>{
-            if(ws.readyState===1) ws.send(JSON.stringify({topic:"phoenix",event:"heartbeat",payload:{},ref:"hb"}));
-          }, 30000);
+          // Send heartbeat every 20 seconds to keep connection alive
+          heartbeat = setInterval(()=>{
+            if(ws.readyState === 1){
+              ws.send(JSON.stringify({topic:"phoenix",event:"heartbeat",payload:{},ref:null}));
+            }
+          }, 20000);
+
+          // Subscribe using correct Supabase Realtime v2 format
+          // One subscription for all postgres changes
+          ws.send(JSON.stringify({
+            topic: "realtime:lsc-all",
+            event: "phx_join",
+            payload: {
+              config: {
+                broadcast: {self: true},
+                postgres_changes: [
+                  {event: "INSERT", schema: "public", table: "messages"},
+                  {event: "INSERT", schema: "public", table: "emergency_alerts"},
+                  {event: "UPDATE", schema: "public", table: "emergency_alerts"},
+                  {event: "INSERT", schema: "public", table: "announcements"},
+                  {event: "INSERT", schema: "public", table: "clock_events"},
+                  {event: "INSERT", schema: "public", table: "cover_requests"},
+                  {event: "UPDATE", schema: "public", table: "cover_requests"},
+                ]
+              }
+            },
+            ref: "1"
+          }));
         };
 
         ws.onmessage = (e) => {
           try{
             const msg = JSON.parse(e.data);
-            if(!msg.payload?.record) return;
-            const rec = msg.payload.record;
-            const table = msg.topic?.split(":")?.[2];
 
-            if(table === "messages" && msg.event === "INSERT"){
+            // Supabase v2: postgres_changes come as event="postgres_changes"
+            // with payload.data containing {type, table, record, old_record}
+            if(msg.event !== "postgres_changes") return;
+            const d = msg.payload?.data;
+            if(!d) return;
+            const {type, table, record: rec} = d;
+            if(!rec || !table) return;
+
+            if(table === "messages" && type === "INSERT"){
               setMsgs(prev => {
-                if(prev.find(m=>m.id===rec.id)) return prev;
-                // Notify if not from me
-                if(rec.sender_id !== user?.id){
-                  if(notifEnabledRef.current){
-                    try{ new Notification("💬 " + rec.sender_name, {body: rec.text?.slice(0,80), icon:"/apple-touch-icon.png"}); }catch(_){}
-                  }
+                if(prev.find(m=>String(m.id)===String(rec.id))) return prev;
+                // Only notify if message is NOT from current user
+                if(rec.sender_id !== userRef.current?.id){
+                  fireNotify("💬 " + rec.sender_name, rec.text?.slice(0,80)||"New message");
                 }
                 return [...prev, rec];
               });
             }
 
-            if(table === "emergency_alerts" && msg.event === "INSERT"){
+            if(table === "emergency_alerts" && type === "INSERT"){
               setEmergency(rec);
               playAlarm();
-              if(notifEnabledRef.current){
-                try{ new Notification("🚨 EMERGENCY ALERT — LSC Safety Unit", {body: rec.message, icon:"/apple-touch-icon.png", requireInteraction: true}); }catch(_){}
-              }
+              fireNotify("🚨 EMERGENCY — LSC Safety Unit", rec.message||"Emergency alert raised", true);
             }
 
-            if(table === "emergency_alerts" && msg.event === "UPDATE"){
-              if(!rec.active){ setEmergency(null); stopAlarm(); }
+            if(table === "emergency_alerts" && type === "UPDATE"){
+              if(rec.active === false){ setEmergency(null); stopAlarm(); }
             }
 
-            if(table === "announcements" && msg.event === "INSERT"){
-              setAnnouncements(prev => prev.find(a=>a.id===rec.id) ? prev : [rec,...prev]);
-              if(notifEnabledRef.current){
-                try{ new Notification("📢 New Notice — LSC Safety Unit", {body: rec.text?.slice(0,80), icon:"/apple-touch-icon.png"}); }catch(_){}
-              }
+            if(table === "announcements" && type === "INSERT"){
+              setAnnouncements(prev => prev.find(a=>String(a.id)===String(rec.id)) ? prev : [rec,...prev]);
+              fireNotify("📢 Notice — LSC Safety Unit", rec.text?.slice(0,80)||"New announcement");
             }
 
-            if(table === "clock_events" && msg.event === "INSERT"){
+            if(table === "clock_events" && type === "INSERT"){
               if(rec.action === "Clock In") setClockedIn(prev => ({...prev, [rec.member_id]: rec}));
               if(rec.action === "Clock Out") setClockedIn(prev => { const c={...prev}; delete c[rec.member_id]; return c; });
             }
 
-            if(table === "cover_requests" && msg.event === "INSERT"){
-              setCoverReqs(prev => prev.find(r=>r.id===rec.id) ? prev : [rec,...prev]);
-            }
-            if(table === "cover_requests" && msg.event === "UPDATE"){
-              setCoverReqs(prev => prev.map(r=>r.id===rec.id?rec:r));
+            if(table === "cover_requests"){
+              if(type === "INSERT") setCoverReqs(prev => prev.find(r=>String(r.id)===String(rec.id)) ? prev : [rec,...prev]);
+              if(type === "UPDATE") setCoverReqs(prev => prev.map(r=>String(r.id)===String(rec.id)?rec:r));
             }
 
           }catch(err){ console.error("Realtime parse error:", err); }
         };
 
         ws.onclose = () => {
-          // Reconnect after 3 seconds
+          if(heartbeat) clearInterval(heartbeat);
           if(wsRetry.current) clearTimeout(wsRetry.current);
           wsRetry.current = setTimeout(connect, 3000);
         };
 
-        ws.onerror = () => { ws.close(); };
+        ws.onerror = (err) => {
+          console.error("WebSocket error:", err);
+          ws.close();
+        };
 
       }catch(err){ console.error("Realtime connect error:", err); }
     }
@@ -854,11 +841,14 @@ function App(){
     ),
     step==="pin"&&selMember&&h(PinPad,{member:selMember,onSuccess:()=>{
               setUser(selMember);
+              userRef.current = selMember;
               setStep("select");
               setTab("home");
-              // Request browser notification permission
+              // Request notification permission immediately on login
               if(typeof Notification !== "undefined" && Notification.permission === "default"){
-                Notification.requestPermission();
+                Notification.requestPermission().then(perm=>{
+                  if(perm==="granted"){ setNotifEnabled(true); notifEnabledRef.current=true; try{localStorage.setItem('lsc_notif','true');}catch(e){} }
+                });
               }
             },onCancel:()=>{setStep("select");setSelMember(null);}})
   );
@@ -980,26 +970,7 @@ function App(){
         div({display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginTop:6},
           h("button",{onClick:()=>setProfileModal(user),style:{...S.smBtn(C.mut),padding:9,width:"100%"}},"👤 My Profile"),
           h("button",{onClick:()=>setPinModal(true),style:{...S.smBtn(C.mut),padding:9,width:"100%"}},"🔒 Change PIN"),
-          (()=>{
-          // Find next upcoming duty for this member (within 14 days, more than 24hrs away)
-          const nowMs = Date.now();
-          const allSundays = Object.values(QUARTERS).flatMap(q=>q.months.flatMap(mo=>mo.sundays));
-          const upcomingDuty = allSundays.find(s=>{
-            const dutyDate = new Date(s.yr, s.m, s.d);
-            const diffMs = dutyDate.getTime() - nowMs;
-            const diffHrs = diffMs / (1000*60*60);
-            const hasDuty = myDuties(user.id, s).length > 0;
-            const withinWindow = diffHrs > 24 && diffHrs <= 14*24;
-            const notAlreadyRequested = !coverReqs.find(r=>r.requester_id===user.id&&r.duty_date===s.date&&r.status==="open");
-            return hasDuty && withinWindow && notAlreadyRequested;
-          });
-          return upcomingDuty ? h("button",{onClick:()=>{
-            setCoverModal(true);
-            setCoverDutyEntry(upcomingDuty);
-          },style:{...S.smBtn(C.purple,"#120a18","#3a2a4a"),padding:9,width:"100%",gridColumn:"span 2"}},
-            "🔄 Request Cover — "+upcomingDuty.date
-          ) : null;
-        })(),
+          !iAmIn&&todayEntry&&myDuties(user.id,todayEntry).length>0&&h("button",{onClick:()=>setCoverModal(true),style:{...S.smBtn(C.purple,"#120a18","#3a2a4a"),padding:9,width:"100%",gridColumn:"span 2"}},"🔄 Request Cover"),
           isAdmin&&isSunday()&&h("button",{onClick:()=>{buildReport();setTab("report");},style:{...S.bigBtn(C.gold,"#1e1608"),gridColumn:"span 2"}},"📊 Generate Duty Report")
         )
       ),
@@ -1524,6 +1495,14 @@ try {
   if(sp){ sp.classList.add('gone'); }
 }
 
+
+// Unlock AudioContext on first touch (mobile browsers block audio until interaction)
+['touchstart','click'].forEach(function(ev){
+  document.addEventListener(ev, function au(){
+    try{ var AC=window.AudioContext||window.webkitAudioContext; if(AC){ var c=new AC(); c.resume().then(function(){c.close();}); } }catch(e){}
+    document.removeEventListener(ev, au);
+  }, {once:true, passive:true});
+});
 </script>
 </body>
 </html>
