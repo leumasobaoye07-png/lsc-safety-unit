@@ -9,7 +9,7 @@ const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 
 webpush.setVapidDetails(
-  'https://lsc-safety-unit.vercel.app',
+  'mailto:admin@lscsafety.app',
   VAPID_PUBLIC_KEY,
   VAPID_PRIVATE_KEY
 );
@@ -42,10 +42,25 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { type, title, body, data, subscriptions: clientSubs } = req.body;
+  // Support both formats:
+  // Format A (from sendPushToAll): { subscriptions, payload: {title, body, type, tag, url} }
+  // Format B (from sendPushNotification): { title, body, type, data, subscriptions }
+  const clientSubs = req.body.subscriptions;
+  let title, body, type, data;
+  
+  if (req.body.payload && typeof req.body.payload === 'object') {
+    // Format A
+    ({ title, body, type, tag: data } = req.body.payload);
+    title = req.body.payload.title;
+    body = req.body.payload.body;
+    type = req.body.payload.type;
+  } else {
+    // Format B
+    ({ title, body, type, data } = req.body);
+  }
 
   if (!title || !body) {
-    return res.status(400).json({ error: 'title and body required' });
+    return res.status(400).json({ error: 'title and body required', received: JSON.stringify(req.body).slice(0, 200) });
   }
 
   const isEmergency = type === 'emergency';
