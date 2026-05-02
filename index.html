@@ -104,32 +104,89 @@ const sb = {
     };
   },
 
-  // Realtime via Supabase WebSocket
+  // Realtime via Supabase WebSocket — v2 protocol with heartbeat + reconnect
   channel(name) {
-    let ws = null; const handlers = {};
-    return {
-      on(event, schema, table, cb) { handlers[`${schema}:${table}`] = cb; return this; },
+    let ws = null;
+    const handlers = {};
+    let heartbeatInterval = null;
+    let reconnectTimeout = null;
+    let ref = 1;
+    let destroyed = false;
+    const self = {
+      on(event, schema, table, cb) {
+        handlers[`${event}:${schema}:${table}`] = cb;
+        return this;
+      },
       subscribe() {
+        if (destroyed) return this;
         try {
           const wsUrl = SUPABASE_URL.replace("https://", "wss://").replace("http://", "ws://") + "/realtime/v1/websocket?apikey=" + SUPABASE_ANON_KEY + "&vsn=1.0.0";
           ws = new WebSocket(wsUrl);
           ws.onopen = () => {
-            ws.send(JSON.stringify({ topic: `realtime:${name}`, event: "phx_join", payload: { config: { broadcast: { self: true }, presence: { key: "" } } }, ref: "1" }));
+            ws.send(JSON.stringify({
+              topic: `realtime:${name}`,
+              event: "phx_join",
+              payload: {
+                config: {
+                  broadcast: { self: true },
+                  presence: { key: "" },
+                  postgres_changes: Object.keys(handlers).map(k => {
+                    const [event, schema, table] = k.split(":");
+                    return { event, schema, table };
+                  })
+                }
+              },
+              ref: String(ref++)
+            }));
+            heartbeatInterval = setInterval(() => {
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ topic: "phoenix", event: "heartbeat", payload: {}, ref: String(ref++) }));
+              }
+            }, 25000);
           };
           ws.onmessage = (e) => {
             try {
               const msg = JSON.parse(e.data);
-              if (msg.event === "INSERT" || msg.event === "UPDATE" || msg.event === "DELETE") {
-                const key = `public:${msg.payload?.table || name}`;
-                if (handlers[key]) handlers[key]({ eventType: msg.event, new: msg.payload?.record, old: msg.payload?.old_record });
+              const evt = msg.event;
+              if (evt === "INSERT" || evt === "UPDATE" || evt === "DELETE") {
+                const data = msg.payload?.data || msg.payload || {};
+                const table = data.table || msg.payload?.table || "";
+                const schema = data.schema || "public";
+                const record = data.record || data.new || msg.payload?.record || msg.payload?.new;
+                const oldRecord = data.old_record || data.old || msg.payload?.old_record;
+                const key = `${evt}:${schema}:${table}`;
+                if (handlers[key]) handlers[key]({ eventType: evt, new: record, old: oldRecord });
+              }
+              if (msg.event === "postgres_changes") {
+                const changes = msg.payload?.data;
+                if (changes) {
+                  const evt = changes.type;
+                  const table = changes.table || "";
+                  const schema = changes.schema || "public";
+                  const key = `${evt}:${schema}:${table}`;
+                  if (handlers[key]) handlers[key]({ eventType: evt, new: changes.record, old: changes.old_record });
+                }
               }
             } catch (_) {}
+          };
+          ws.onerror = () => {};
+          ws.onclose = () => {
+            clearInterval(heartbeatInterval);
+            if (!destroyed) {
+              reconnectTimeout = setTimeout(() => { self.subscribe(); }, 3000);
+            }
           };
         } catch (_) {}
         return this;
       },
-      unsubscribe() { try { if (ws) ws.close(); } catch (_) {} }
+      unsubscribe() {
+        destroyed = true;
+        clearInterval(heartbeatInterval);
+        clearTimeout(reconnectTimeout);
+        try { if (ws) ws.close(); } catch (_) {}
+      }
     };
+    return self;
   }
 };
 
@@ -143,7 +200,7 @@ async function hashPin(pin) {
 const DEMO_PIN_HASH = "9af15b336e6a9619928537df30b2e6a2376569fcf9d7e773eccede65606529a0";
 
 // ─── PUSH NOTIFICATIONS ───────────────────────────────────────────────────────
-const VAPID_PUBLIC_KEY = "BDbu43RqzhNIiFE3McOiIE5eY2pBF0ZCp0N_Uc4RS6dy7UC5uGRzVr1IiBfaEJFXQGIKftNpwo1aSXqbHyG8iIY";
+const VAPID_PUBLIC_KEY = "BO5uvVfO7iqvK7DoA_6nz2MwtQPRswrQ2s0i9LyNSWX6szEwSlkxEjxm_EdZynHZJ4GjR0aMezsjT6MjT_aMGQE";
 
 function urlB64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -164,21 +221,11 @@ async function subscribeToPush(memberId) {
       });
     }
     const subJson = sub.toJSON();
-    // Upsert - update if endpoint exists, insert if new
-    await fetch(SUPABASE_URL + '/rest/v1/push_subscriptions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-        'Prefer': 'resolution=merge-duplicates'
-      },
-      body: JSON.stringify({
-        member_id: memberId,
-        endpoint: subJson.endpoint,
-        p256dh: subJson.keys?.p256dh,
-        auth: subJson.keys?.auth,
-      })
+    await (await sb.from('push_subscriptions')).insert({
+      member_id: memberId,
+      endpoint: subJson.endpoint,
+      p256dh: subJson.keys?.p256dh,
+      auth: subJson.keys?.auth,
     });
     return sub;
   } catch (e) {
@@ -606,6 +653,7 @@ function MainApp() {
   const [reportData, setReportData] = useState(null);
   const [netError, setNetError] = useState(null);
   const [notifPermission, setNotifPermission] = useState(typeof Notification !== "undefined" ? Notification.permission : "default");
+  const [showIOSInstall, setShowIOSInstall] = useState(false);
 
   // Modals
   const [clockRoleModal, setClockRoleModal] = useState(false);
@@ -632,10 +680,6 @@ function MainApp() {
   const msgEndRef = useRef(null);
   const realtimeRef = useRef(null);
   const emergencyTimerRef = useRef(null);
-  const msgPollRef = useRef(null);
-  const lastMsgIdRef = useRef(0);
-  const emergencyPollRef = useRef(null);
-  const lastEmergencyIdRef = useRef(0);
 
   // Demo mode state mirrors
   const [demoClockEvents, setDemoClockEvents] = useState([]);
@@ -658,7 +702,7 @@ function MainApp() {
     const n = new Date(); const m = n.getMonth(); const y = n.getFullYear();
     const qm = { 0:"Q1",1:"Q1",2:"Q1",3:"Q2",4:"Q2",5:"Q2",6:"Q3",7:"Q3",8:"Q3",9:"Q4",10:"Q4",11:"Q4" };
     const qk = `${qm[m]}-${y}`; if (QUARTERS[qk]) { setRosterQ(qk); setRosterMonth(0); }
-    return () => { clearInterval(timer); if (realtimeRef.current) realtimeRef.current.unsubscribe(); if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current); if (msgPollRef.current) clearInterval(msgPollRef.current); if (emergencyPollRef.current) clearInterval(emergencyPollRef.current); };
+    return () => { clearInterval(timer); if (realtimeRef.current) realtimeRef.current.unsubscribe(); if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current); };
   }, []);
 
   async function initApp() {
@@ -749,52 +793,6 @@ function MainApp() {
     }
   }
 
-  function setupRealtime() {
-    const ch = sb.channel("public:all");
-    ch.on("INSERT", "public", "messages", payload => {
-      setMessages(prev => [...prev, payload.new]);
-    });
-    ch.on("INSERT", "public", "clock_events", payload => {
-      const e = payload.new;
-      setClockEvents(prev => [e, ...prev]);
-      if (e.action === "Clock In") setClockedIn(prev => ({ ...prev, [e.member_id]: e }));
-      if (e.action === "Clock Out") setClockedIn(prev => { const c = { ...prev }; delete c[e.member_id]; return c; });
-    });
-    ch.on("INSERT", "public", "emergency_alerts", payload => {
-      setEmergencyAlert(payload.new);
-      playAlarm();
-      // Keep ringing every 6 seconds until dismissed
-      if (emergencyTimerRef.current) clearInterval(emergencyTimerRef.current);
-      emergencyTimerRef.current = setInterval(() => {
-        setEmergencyAlert(prev => {
-          if (prev) {
-            playAlarm();
-            if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
-            return prev;
-          }
-          clearInterval(emergencyTimerRef.current);
-          return null;
-        });
-      }, 6000);
-    });
-    ch.on("UPDATE", "public", "emergency_alerts", payload => {
-      if (!payload.new.active) setEmergencyAlert(null);
-    });
-    ch.on("INSERT", "public", "announcements", payload => {
-      setAnnouncements(prev => [payload.new, ...prev]);
-    });
-    ch.on("INSERT", "public", "cover_requests", payload => {
-      setCoverRequests(prev => [payload.new, ...prev]);
-    });
-    ch.on("UPDATE", "public", "cover_requests", payload => {
-      setCoverRequests(prev => prev.map(c => c.id === payload.new.id ? payload.new : c));
-    });
-    ch.subscribe();
-    realtimeRef.current = ch;
-    startMsgPolling();
-    startEmergencyPolling();
-  }
-
   function startMsgPolling() {
     if (msgPollRef.current) clearInterval(msgPollRef.current);
     msgPollRef.current = setInterval(async () => {
@@ -830,63 +828,118 @@ function MainApp() {
             lastEmergencyIdRef.current = alert.id;
             setEmergencyAlert(alert);
             playAlarm();
-            if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
+            if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,500,200,800]);
             if (emergencyTimerRef.current) clearInterval(emergencyTimerRef.current);
             emergencyTimerRef.current = setInterval(() => {
               setEmergencyAlert(prev => {
-                if (prev) {
-                  playAlarm();
-                  if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,200,800]);
-                  return prev;
-                }
+                if (prev) { playAlarm(); return prev; }
                 clearInterval(emergencyTimerRef.current);
                 return null;
               });
             }, 6000);
           }
         } else {
-          // No active alerts — clear if we had one
-          if (lastEmergencyIdRef.current !== 0) {
-            lastEmergencyIdRef.current = 0;
-          }
+          if (lastEmergencyIdRef.current !== 0) lastEmergencyIdRef.current = 0;
         }
       } catch(e) {}
     }, 2000);
   }
 
+    function setupRealtime() {
+    const ch = sb.channel("public:all");
+    ch.on("INSERT", "public", "messages", payload => {
+      if (!payload.new) return;
+      setMessages(prev => {
+        if (prev.find(m => m.id === payload.new.id)) return prev;
+        return [...prev, payload.new];
+      });
+    });
+    ch.on("INSERT", "public", "clock_events", payload => {
+      if (!payload.new) return;
+      const e = payload.new;
+      setClockEvents(prev => [e, ...prev]);
+      if (e.action === "Clock In") setClockedIn(prev => ({ ...prev, [e.member_id]: e }));
+      if (e.action === "Clock Out") setClockedIn(prev => { const c = { ...prev }; delete c[e.member_id]; return c; });
+    });
+    ch.on("INSERT", "public", "emergency_alerts", payload => {
+      if (!payload.new) return;
+      setEmergencyAlert(payload.new);
+      playAlarm();
+      if (emergencyTimerRef.current) clearInterval(emergencyTimerRef.current);
+      emergencyTimerRef.current = setInterval(() => {
+        setEmergencyAlert(prev => {
+          if (prev) { playAlarm(); return prev; }
+          clearInterval(emergencyTimerRef.current);
+          return null;
+        });
+      }, 6000);
+    });
+    ch.on("UPDATE", "public", "emergency_alerts", payload => {
+      if (!payload.new) return;
+      if (!payload.new.active) setEmergencyAlert(null);
+    });
+    ch.on("INSERT", "public", "announcements", payload => {
+      if (!payload.new) return;
+      setAnnouncements(prev => [payload.new, ...prev]);
+    });
+    ch.on("INSERT", "public", "cover_requests", payload => {
+      if (!payload.new) return;
+      setCoverRequests(prev => [payload.new, ...prev]);
+    });
+    ch.on("UPDATE", "public", "cover_requests", payload => {
+      if (!payload.new) return;
+      setCoverRequests(prev => prev.map(c => c.id === payload.new.id ? payload.new : c));
+    });
+    ch.subscribe();
+    realtimeRef.current = ch;
+    startMsgPolling();
+    startEmergencyPolling();
+  }
+
   // ── ALARM ──
+  // Unlock AudioContext on first user gesture — critical for iOS Safari
+  const unlockAudio = useCallback(() => {
+    try {
+      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.current.state === "suspended") {
+        audioCtx.current.resume().catch(() => {});
+      }
+      // Play a silent buffer to fully unlock on iOS
+      const ctx = audioCtx.current;
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch(e) {}
+  }, []);
+
   const playAlarm = useCallback(() => {
     try {
       if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
       const ctx = audioCtx.current;
-      [0, 0.3, 0.6, 0.9, 1.2, 1.5].forEach(t => {
-        const osc = ctx.createOscillator(); const gain = ctx.createGain();
-        osc.connect(gain); gain.connect(ctx.destination);
-        osc.type = "square"; osc.frequency.setValueAtTime(1040, ctx.currentTime + t);
-        osc.frequency.setValueAtTime(700, ctx.currentTime + t + 0.15);
-        gain.gain.setValueAtTime(0.5, ctx.currentTime + t);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.28);
-        osc.start(ctx.currentTime + t); osc.stop(ctx.currentTime + t + 0.3);
-      });
+      // iOS: AudioContext may be suspended if no prior user gesture unlocked it.
+      // Resume first, then schedule sounds after the promise resolves.
+      const doPlay = () => {
+        try {
+          [0, 0.3, 0.6, 0.9, 1.2, 1.5].forEach(t => {
+            const osc = ctx.createOscillator(); const gain = ctx.createGain();
+            osc.connect(gain); gain.connect(ctx.destination);
+            osc.type = "square"; osc.frequency.setValueAtTime(1040, ctx.currentTime + t);
+            osc.frequency.setValueAtTime(700, ctx.currentTime + t + 0.15);
+            gain.gain.setValueAtTime(0.5, ctx.currentTime + t);
+            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.28);
+            osc.start(ctx.currentTime + t); osc.stop(ctx.currentTime + t + 0.3);
+          });
+        } catch(e) {}
+      };
+      if (ctx.state === "suspended") {
+        ctx.resume().then(doPlay).catch(() => {});
+      } else {
+        doPlay();
+      }
     } catch (e) {}
-    // Vibrate only on Android (iOS Safari doesn't support it)
-    if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
-  }, []);
-
-  // ── CHAT BEEP ──
-  const playMsgBeep = useCallback(() => {
-    try {
-      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
-      const ctx = audioCtx.current;
-      const osc = ctx.createOscillator(); const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.type = "sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.25);
-    } catch(e) {}
-    if (!isIOS() && navigator.vibrate) navigator.vibrate([80, 40, 80]);
+    if (!isIOS() && navigator.vibrate) navigator.vibrate([400, 100, 400, 100, 400, 100, 600]);
   }, []);
 
   // ── SEED MEMBERS ──
@@ -991,7 +1044,6 @@ function MainApp() {
   async function fireEmergency() {
     if (!emergencyMsg.trim()) return;
     playAlarm();
-    if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
     if (!IS_DEMO) sendPushToAll({
       type: 'emergency',
       title: '🚨 EMERGENCY — LSC Safety',
@@ -1013,7 +1065,6 @@ function MainApp() {
   }
 
   async function dismissEmergency() {
-    if (emergencyTimerRef.current) clearInterval(emergencyTimerRef.current);
     setEmergencyAlert(null);
     if (!IS_DEMO && emergencyAlert?.id) {
       try { await (await sb.from("emergency_alerts")).update({ active: false }, `id=eq.${emergencyAlert.id}`); } catch (_) {}
@@ -1175,7 +1226,10 @@ function MainApp() {
   const tabs = isAdmin ? adminTabs : memberTabs;
 
   return (
-    <div style={{ fontFamily: "Georgia, serif", minHeight: "100vh", background: `linear-gradient(160deg,${C.bg},#12100e,#0d0f0a)`, color: C.text, display: "flex", flexDirection: "column" }}>
+    <div style={{ fontFamily: "Georgia, serif", minHeight: "100vh", background: `linear-gradient(160deg,${C.bg},#12100e,#0d0f0a)`, color: C.text, display: "flex", flexDirection: "column" }}
+      onTouchStart={unlockAudio}
+      onClick={unlockAudio}
+    >
 
       {/* EMERGENCY OVERLAY */}
       {emergencyAlert && (
@@ -1186,10 +1240,7 @@ function MainApp() {
             <div style={{ fontSize: 18, fontWeight: "bold", color: "#ffaaaa", marginBottom: 8 }}>{emergencyAlert.message}</div>
             <div style={{ fontSize: 11, color: "#aa4444", marginBottom: 16 }}>Raised by {emergencyAlert.raised_by} · {fT(emergencyAlert.timestamp)}</div>
             <div style={{ fontSize: 13, color: "#ff8888", fontWeight: "bold", marginBottom: 18 }}>ALL TEAM — CONVERGE NOW</div>
-            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-              <button onClick={dismissEmergency} style={{ background: "#2a0000", border: "1px solid #ff4444", color: "#ff6666", padding: "9px 22px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontSize: 12 }}>✓ Acknowledged</button>
-              {isAdmin && <button onClick={dismissEmergency} style={{ background: "#3a0000", border: "1px solid #ff4444", color: "#ff9999", padding: "9px 22px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontSize: 12 }}>🔕 Dismiss for All</button>}
-            </div>
+            {isAdmin && <button onClick={dismissEmergency} style={{ background: "#2a0000", border: "1px solid #ff4444", color: "#ff6666", padding: "9px 22px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontSize: 12 }}>Dismiss Alert</button>}
           </div>
         </div>
       )}
@@ -1205,7 +1256,7 @@ function MainApp() {
           <div style={{ textAlign: "right" }}>
             <div style={{ fontSize: 15, fontWeight: "bold", color: C.gold, fontFamily: "monospace" }}>{currentTime.toLocaleTimeString("en-NG", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 5, justifyContent: "flex-end", marginTop: 2 }}>
-              <button onClick={() => setEmergencyModal(true)} style={{ background: "#2a0808", border: "2px solid #cc2222", color: "#ff6666", fontSize: 12, padding: "5px 14px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontWeight: "bold", letterSpacing: 1 }}>🚨 ALERT</button>
+              {isAdmin && <button onClick={() => setEmergencyModal(true)} style={{ background: "#2a0808", border: "1px solid #8a2828", color: C.red, fontSize: 9, padding: "2px 8px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontWeight: "bold" }}>🚨 ALERT</button>}
               <button onClick={() => { setLoggedIn(null); clearSession(); setTab("home"); }} style={{ background: "#2a1a1a", border: "1px solid #4a2a2a", color: C.red, fontSize: 9, padding: "2px 7px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif" }}>Logout</button>
             </div>
             <div style={{ fontSize: 9, color: isAdmin ? C.gold : C.muted, marginTop: 1 }}>{loggedIn.name}{isAdmin ? " · Admin" : ""}{IS_DEMO ? " · Demo" : ""}</div>
@@ -1301,17 +1352,21 @@ function MainApp() {
             ))}
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginTop: 6 }}>
-              {notifPermission !== "granted" && !IS_DEMO && (
-                <button onClick={async () => {
-                  const sub = await subscribeToPush(loggedIn.id);
-                  setNotifPermission(typeof Notification !== "undefined" ? Notification.permission : "default");
-                }} style={{ background: "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: "2px solid #4a8a4a", color: C.green, padding: "11px", borderRadius: 9, cursor: "pointer", fontSize: 12, fontFamily: "Georgia, serif", fontWeight: "bold", gridColumn: "span 2", marginBottom: 4 }}>
-                  🔔 Tap to Enable Alert Notifications
-                </button>
+              {/* iOS: PWA install instruction */}
+              {isIOS() && !window.navigator.standalone && !IS_DEMO && (
+                <div style={{ background: "linear-gradient(135deg,#0a1820,#0a1020)", border: "2px solid #2a5a8a", borderRadius: 9, padding: "10px 12px", gridColumn: "span 2", marginBottom: 4 }}>
+                  <div style={{ fontSize: 11, color: "#60a0d0", fontWeight: "bold", marginBottom: 3 }}>📲 Get Emergency Alerts on iPhone</div>
+                  <div style={{ fontSize: 10, color: "#4a7a9a", lineHeight: 1.7 }}>Tap <strong style={{color:"#80c0f0"}}>Share ↑</strong> → <strong style={{color:"#80c0f0"}}>"Add to Home Screen"</strong>, then open from your home screen to receive push alerts.</div>
+                </div>
               )}
-              {notifPermission === "granted" && !IS_DEMO && (
-                <button onClick={async () => { await subscribeToPush(loggedIn.id); }} style={{ background: C.surface, border: `1px solid #2a4a2a`, color: "#4a8a4a", padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 10, fontFamily: "Georgia, serif", gridColumn: "span 2" }}>
-                  ✓ Notifications enabled · Tap to refresh
+              {/* Notification enable — iOS standalone OR Android */}
+              {!IS_DEMO && (window.navigator.standalone || !isIOS()) && (
+                <button onClick={async () => {
+                  unlockAudio();
+                  await subscribeToPush(loggedIn.id);
+                  setNotifPermission(typeof Notification !== "undefined" ? Notification.permission : "default");
+                }} style={{ background: notifPermission === "granted" ? C.surface : "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: `2px solid ${notifPermission === "granted" ? "#2a4a2a" : "#4a8a4a"}`, color: notifPermission === "granted" ? "#4a8a4a" : C.green, padding: "11px", borderRadius: 9, cursor: "pointer", fontSize: notifPermission === "granted" ? 10 : 12, fontFamily: "Georgia, serif", fontWeight: "bold", gridColumn: "span 2", marginBottom: 4 }}>
+                  {notifPermission === "granted" ? "✓ Alerts active — Tap to refresh" : "🔔 Tap to Enable Emergency Alerts"}
                 </button>
               )}
               <button onClick={() => setProfileModal(loggedIn)} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.muted, padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 11, fontFamily: "Georgia, serif" }}>👤 My Profile</button>
