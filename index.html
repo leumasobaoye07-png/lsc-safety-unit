@@ -750,15 +750,19 @@ function MainApp() {
     ch.on("INSERT", "public", "emergency_alerts", payload => {
       setEmergencyAlert(payload.new);
       playAlarm();
-      // Keep ringing every 8 seconds until dismissed
+      // Keep ringing every 6 seconds until dismissed
       if (emergencyTimerRef.current) clearInterval(emergencyTimerRef.current);
       emergencyTimerRef.current = setInterval(() => {
         setEmergencyAlert(prev => {
-          if (prev) { playAlarm(); return prev; }
+          if (prev) {
+            playAlarm();
+            if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
+            return prev;
+          }
           clearInterval(emergencyTimerRef.current);
           return null;
         });
-      }, 8000);
+      }, 6000);
     });
     ch.on("UPDATE", "public", "emergency_alerts", payload => {
       if (!payload.new.active) setEmergencyAlert(null);
@@ -817,7 +821,7 @@ function MainApp() {
       });
     } catch (e) {}
     // Vibrate only on Android (iOS Safari doesn't support it)
-    if (!isIOS() && navigator.vibrate) navigator.vibrate([400, 100, 400, 100, 400, 100, 600]);
+    if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
   }, []);
 
   // ── CHAT BEEP ──
@@ -938,6 +942,7 @@ function MainApp() {
   async function fireEmergency() {
     if (!emergencyMsg.trim()) return;
     playAlarm();
+    if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
     if (!IS_DEMO) sendPushToAll({
       type: 'emergency',
       title: '🚨 EMERGENCY — LSC Safety',
@@ -1151,7 +1156,7 @@ function MainApp() {
           <div style={{ textAlign: "right" }}>
             <div style={{ fontSize: 15, fontWeight: "bold", color: C.gold, fontFamily: "monospace" }}>{currentTime.toLocaleTimeString("en-NG", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 5, justifyContent: "flex-end", marginTop: 2 }}>
-              {isAdmin && <button onClick={() => setEmergencyModal(true)} style={{ background: "#2a0808", border: "1px solid #8a2828", color: C.red, fontSize: 9, padding: "2px 8px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontWeight: "bold" }}>🚨 ALERT</button>}
+              <button onClick={() => setEmergencyModal(true)} style={{ background: "#2a0808", border: "2px solid #cc2222", color: "#ff6666", fontSize: 12, padding: "5px 14px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontWeight: "bold", letterSpacing: 1 }}>🚨 ALERT</button>
               <button onClick={() => { setLoggedIn(null); clearSession(); setTab("home"); }} style={{ background: "#2a1a1a", border: "1px solid #4a2a2a", color: C.red, fontSize: 9, padding: "2px 7px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif" }}>Logout</button>
             </div>
             <div style={{ fontSize: 9, color: isAdmin ? C.gold : C.muted, marginTop: 1 }}>{loggedIn.name}{isAdmin ? " · Admin" : ""}{IS_DEMO ? " · Demo" : ""}</div>
