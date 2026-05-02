@@ -139,6 +139,96 @@ async function hashPin(pin) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+// ─── DEMO PIN HASH (SHA-256 of "0000") ───────────────────────────────────────
+const DEMO_PIN_HASH = "9af15b336e6a9619928537df30b2e6a2376569fcf9d7e773eccede65606529a0";
+
+// ─── PUSH NOTIFICATIONS ───────────────────────────────────────────────────────
+const VAPID_PUBLIC_KEY = "BDbu43RqzhNIiFE3McOiIE5eY2pBF0ZCp0N_Uc4RS6dy7UC5uGRzVr1IiBfaEJFXQGIKftNpwo1aSXqbHyG8iIY";
+
+function urlB64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+}
+
+async function subscribeToPush(memberId) {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+    }
+    const subJson = sub.toJSON();
+    await (await sb.from('push_subscriptions')).insert({
+      member_id: memberId,
+      endpoint: subJson.endpoint,
+      p256dh: subJson.keys?.p256dh,
+      auth: subJson.keys?.auth,
+    });
+    return sub;
+  } catch (e) {
+    console.warn('Push subscribe failed:', e.message);
+    return null;
+  }
+}
+
+async function sendPushToAll(payload) {
+  try {
+    const db = await sb.from('push_subscriptions');
+    const { data: subs } = await db.select('*');
+    if (!subs || !subs.length) return;
+    const unique = Object.values(subs.reduce((acc, s) => { acc[s.endpoint] = s; return acc; }, {}));
+    const subscriptions = unique.map(s => ({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }));
+    await fetch('/api/push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscriptions, payload }),
+    });
+  } catch (e) {
+    console.warn('sendPushToAll failed:', e.message);
+  }
+}
+
+async function sendPushToInactive(payload, excludeMemberId, presenceMap) {
+  try {
+    const db = await sb.from('push_subscriptions');
+    let { data: subs } = await db.select('*');
+    if (!subs || !subs.length) return;
+    const now = Date.now();
+    const inactive = subs.filter(s => {
+      if (s.member_id === excludeMemberId) return false;
+      const last = presenceMap[s.member_id];
+      if (!last) return true;
+      return (now - new Date(last).getTime()) > 10000;
+    });
+    if (!inactive.length) return;
+    const subscriptions = inactive.map(s => ({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }));
+    await fetch('/api/push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscriptions, payload }),
+    });
+  } catch (e) {
+    console.warn('sendPushToInactive failed:', e.message);
+  }
+}
+// ─── SESSION PERSISTENCE ──────────────────────────────────────────────────────
+const SESSION_KEY = "lsc_session_v1";
+function saveSession(member) {
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify({ id: member.id, name: member.name, role: member.role })); } catch(_) {}
+}
+function loadSession() {
+  try { const s = sessionStorage.getItem(SESSION_KEY); return s ? JSON.parse(s) : null; } catch(_) { return null; }
+}
+function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch(_) {}
+}
+
 // ─── TEAM CONFIG (names + default PINs for initial seeding) ─────────────────
 const TEAM_CONFIG = [
   { id: "S",  name: "Samuel",   defaultPin: "1234", role: "admin"  },
@@ -292,9 +382,24 @@ function PinPad({ member, onSuccess, onCancel }) {
   const [shake, setShake] = useState(false);
   const [hint, setHint] = useState("");
   const [checking, setChecking] = useState(false);
+  const [attempts, setAttempts] = useState(0);
+  const [lockedUntil, setLockedUntil] = useState(null);
+  const [lockTick, setLockTick] = useState(0);
+
+  useEffect(() => {
+    if (!lockedUntil) return;
+    const t = setInterval(() => {
+      if (Date.now() >= lockedUntil) { setLockedUntil(null); clearInterval(t); }
+      else setLockTick(x => x + 1);
+    }, 1000);
+    return () => clearInterval(t);
+  }, [lockedUntil]);
+
+  const isLocked = lockedUntil && Date.now() < lockedUntil;
+  const lockSecondsLeft = isLocked ? Math.ceil((lockedUntil - Date.now()) / 1000) : 0;
 
   const press = async d => {
-    if (pin.length >= 4 || checking) return;
+    if (pin.length >= 4 || checking || isLocked) return;
     const next = pin + d;
     setPin(next);
     if (next.length === 4) {
@@ -302,11 +407,21 @@ function PinPad({ member, onSuccess, onCancel }) {
       setTimeout(async () => {
         const inputHash = await hashPin(next);
         if (inputHash === member.pin_hash) {
+          setAttempts(0);
           onSuccess();
         } else {
+          const newAttempts = attempts + 1;
+          setAttempts(newAttempts);
           setShake(true);
-          setHint("Incorrect PIN. Try again.");
-          setTimeout(() => { setPin(""); setShake(false); setHint(""); setChecking(false); }, 800);
+          if (newAttempts >= 5) {
+            setLockedUntil(Date.now() + 30000);
+            setHint("Too many attempts. Locked for 30s.");
+            setAttempts(0);
+          } else {
+            setHint(`Incorrect PIN. ${5 - newAttempts} attempt${5 - newAttempts === 1 ? "" : "s"} left.`);
+          }
+          setTimeout(() => { setPin(""); setShake(false); setChecking(false); }, 800);
+          setTimeout(() => { if (newAttempts < 5) setHint(""); }, 2500);
         }
       }, 100);
     }
@@ -319,7 +434,8 @@ function PinPad({ member, onSuccess, onCancel }) {
           <div style={{ fontSize: 9, color: C.muted, letterSpacing: 3, textTransform: "uppercase", marginBottom: 2 }}>Enter PIN</div>
           <div style={{ fontSize: 17, fontWeight: "bold", color: C.gold }}>{member.name}</div>
           {hint && <div style={{ fontSize: 11, color: C.red, marginTop: 5 }}>{hint}</div>}
-          {checking && <div style={{ fontSize: 10, color: C.amber, marginTop: 3 }}>Verifying...</div>}
+          {isLocked && <div style={{ fontSize: 10, color: C.red, marginTop: 3 }}>🔒 Locked — wait {lockSecondsLeft}s</div>}
+          {checking && !isLocked && <div style={{ fontSize: 10, color: C.amber, marginTop: 3 }}>Verifying...</div>}
         </div>
         <div style={{ display: "flex", justifyContent: "center", gap: 14, marginBottom: 20, transform: shake ? "translateX(-5px)" : "none", transition: "transform 0.1s" }}>
           {[0, 1, 2, 3].map(i => <div key={i} style={{ width: 13, height: 13, borderRadius: "50%", background: i < pin.length ? C.gold : "transparent", border: `2px solid ${i < pin.length ? C.gold : "#3a2e1a"}`, transition: "all 0.15s" }} />)}
@@ -388,6 +504,64 @@ function DemoBanner() {
     <div style={{ background: "#1a1a08", border: "1px solid #5a5a18", borderRadius: 8, padding: "9px 13px", marginBottom: 10, fontSize: 11, color: "#cdcd6a", lineHeight: 1.6 }}>
       <strong>⚙️ Demo Mode</strong> — Supabase not connected. Data is temporary (resets on close).<br />
       <span style={{ fontSize: 10, color: C.dim }}>Replace SUPABASE_URL and SUPABASE_ANON_KEY at top of file to go live.</span>
+    </div>
+  );
+}
+
+
+// ─── MONTHLY TAB COMPONENT (extracted from IIFE to fix hook rules) ────────────
+function MonthlyTab({ allClockEvents, activeIncidents }) {
+  const [selYear, setSelYear] = useState(new Date().getFullYear());
+  const [selMonth, setSelMonth] = useState(new Date().getMonth());
+
+  const allSundays = Object.values(QUARTERS).flatMap(q => q.months.flatMap(m => m.sundays)).filter(s => s.month === selMonth && s.year === selYear);
+  const totalDuties = allSundays.length;
+  const monthClockIns = allClockEvents.filter(e => { const d = new Date(e.timestamp); return d.getMonth() === selMonth && d.getFullYear() === selYear && e.action === "Clock In"; });
+  const uniquePresent = new Set(monthClockIns.map(e => e.member_id)).size;
+  const monthInc = activeIncidents.filter(i => { const d = new Date(i.timestamp); return d.getMonth() === selMonth && d.getFullYear() === selYear; });
+  const memberRows = TEAM_CONFIG.map(m => {
+    const present = monthClockIns.filter(e => e.member_id === m.id).length;
+    const scheduled = allSundays.filter(s => Object.values(s.slots).some(p => p.some(pair => pair.includes(m.id)))).length;
+    return { ...m, present, scheduled, pct: scheduled > 0 ? Math.round((present / scheduled) * 100) : 0 };
+  });
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <select value={selMonth} onChange={e => setSelMonth(+e.target.value)} style={{ flex: 1, background: "#0a0908", border: `1px solid ${C.border}`, borderRadius: 7, padding: "7px 10px", color: C.text, fontSize: 12, fontFamily: "Georgia, serif" }}>
+          {Array.from({ length: 12 }, (_, i) => <option key={i} value={i}>{MON(i)}</option>)}
+        </select>
+        <select value={selYear} onChange={e => setSelYear(+e.target.value)} style={{ background: "#0a0908", border: `1px solid ${C.border}`, borderRadius: 7, padding: "7px 10px", color: C.text, fontSize: 12, fontFamily: "Georgia, serif" }}>
+          {[2025, 2026].map(y => <option key={y}>{y}</option>)}
+        </select>
+      </div>
+      <div style={{ background: "linear-gradient(135deg,#1a1508,#0f1a0a)", border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 13px", marginBottom: 12, textAlign: "center" }}>
+        <div style={{ fontSize: 9, letterSpacing: 3, color: C.gold, textTransform: "uppercase" }}>✝ The Living Shield — LSC Abuja Safety Unit</div>
+        <div style={{ fontSize: 13, fontWeight: "bold", color: "#f0e6c8", marginTop: 2 }}>MONTHLY SUMMARY — {MON(selMonth).toUpperCase()} {selYear}</div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginBottom: 12 }}>
+        {[{ label: "Services", value: totalDuties, color: C.gold }, { label: "Members Present", value: uniquePresent, color: C.green }, { label: "Incidents", value: monthInc.length, color: "#cd7a3a" }, { label: "Team Size", value: TEAM_CONFIG.length, color: C.blue }].map(s => (
+          <div key={s.label} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 9, padding: "10px 8px", textAlign: "center" }}>
+            <div style={{ fontSize: 20, fontWeight: "bold", color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 9, color: C.dim, marginTop: 2 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: C.gold, fontWeight: "bold", marginBottom: 8 }}>Attendance by Member</div>
+      {[...memberRows].sort((a, b) => b.pct - a.pct).map(m => (
+        <div key={m.id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 9, padding: "9px 12px", marginBottom: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+            <div style={{ width: 26, height: 26, borderRadius: "50%", background: "#1e1c14", border: "1px solid #282420", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: C.muted }}>{m.id}</div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: "bold", color: C.text }}>{m.name}</div>
+              <div style={{ fontSize: 10, color: C.dim }}>{m.present}/{m.scheduled} services</div>
+            </div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 14, fontWeight: "bold", color: m.pct >= 80 ? C.green : m.pct >= 50 ? C.amber : C.red }}>{m.pct}%</div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -477,7 +651,9 @@ function MainApp() {
   async function initApp() {
     setLoadMsg("Connecting...");
     if (IS_DEMO) {
-      setMembers(TEAM_CONFIG.map(m => ({ ...m, pin_hash: "demo" })));
+      setMembers(TEAM_CONFIG.map(m => ({ ...m, pin_hash: DEMO_PIN_HASH })));
+      const saved = loadSession();
+      if (saved) { setLoggedIn({ ...saved, pin_hash: DEMO_PIN_HASH }); }
       setAppLoading(false);
       return;
     }
@@ -494,6 +670,12 @@ function MainApp() {
       setMembers(data);
       await loadAllData();
       setupRealtime();
+      const saved = loadSession();
+      if (saved) {
+        const fullMember = data.find(m => m.id === saved.id);
+        if (fullMember) setLoggedIn(fullMember);
+        else clearSession();
+      }
       setAppLoading(false);
     } catch (e) {
       setNetError(e.message);
@@ -585,7 +767,6 @@ function MainApp() {
     });
     ch.subscribe();
     realtimeRef.current = ch;
-    // Polling fallback for real-time messages (every 3 seconds)
     startMsgPolling();
   }
 
@@ -727,6 +908,13 @@ function MainApp() {
   async function fireEmergency() {
     if (!emergencyMsg.trim()) return;
     playAlarm();
+    if (!IS_DEMO) sendPushToAll({
+      type: 'emergency',
+      title: '🚨 EMERGENCY — LSC Safety',
+      body: emergencyMsg,
+      tag: 'emergency',
+      url: '/',
+    });
     if (IS_DEMO) {
       setEmergencyAlert({ message: emergencyMsg, raised_by: loggedIn.name, timestamp: new Date().toISOString() });
       if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current);
@@ -889,8 +1077,8 @@ function MainApp() {
         )}
         {loginStep === "pin" && selectedMember && (
           IS_DEMO
-            ? <PinPad member={{ ...selectedMember, pin_hash: (async () => { /* demo: accept any 4-digit */ })() }} onSuccess={() => { setLoggedIn(selectedMember); setLoginStep("select"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
-            : <PinPad member={selectedMember} onSuccess={() => { setLoggedIn(selectedMember); setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
+            ? <PinPad member={{ ...selectedMember, pin_hash: DEMO_PIN_HASH }} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember); if (!IS_DEMO) subscribeToPush(selectedMember.id);setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
+            : <PinPad member={selectedMember} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember); if (!IS_DEMO) subscribeToPush(selectedMember.id); setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
         )}
       </div>
     );
@@ -930,7 +1118,7 @@ function MainApp() {
             <div style={{ fontSize: 15, fontWeight: "bold", color: C.gold, fontFamily: "monospace" }}>{currentTime.toLocaleTimeString("en-NG", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 5, justifyContent: "flex-end", marginTop: 2 }}>
               {isAdmin && <button onClick={() => setEmergencyModal(true)} style={{ background: "#2a0808", border: "1px solid #8a2828", color: C.red, fontSize: 9, padding: "2px 8px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontWeight: "bold" }}>🚨 ALERT</button>}
-              <button onClick={() => { setLoggedIn(null); setTab("home"); }} style={{ background: "#2a1a1a", border: "1px solid #4a2a2a", color: C.red, fontSize: 9, padding: "2px 7px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif" }}>Logout</button>
+              <button onClick={() => { setLoggedIn(null); clearSession(); setTab("home"); }} style={{ background: "#2a1a1a", border: "1px solid #4a2a2a", color: C.red, fontSize: 9, padding: "2px 7px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif" }}>Logout</button>
             </div>
             <div style={{ fontSize: 9, color: isAdmin ? C.gold : C.muted, marginTop: 1 }}>{loggedIn.name}{isAdmin ? " · Admin" : ""}{IS_DEMO ? " · Demo" : ""}</div>
           </div>
@@ -1258,59 +1446,8 @@ function MainApp() {
         )}
 
         {/* ══ MONTHLY ══ */}
-        {tab === "monthly" && isAdmin && (() => {
-          const [selYear, setSelYear] = useState(new Date().getFullYear());
-          const [selMonth, setSelMonth] = useState(new Date().getMonth());
-          const allSundays = Object.values(QUARTERS).flatMap(q => q.months.flatMap(m => m.sundays)).filter(s => s.month === selMonth && s.year === selYear);
-          const totalDuties = allSundays.length;
-          const monthClockIns = allClockEvents.filter(e => { const d = new Date(e.timestamp); return d.getMonth() === selMonth && d.getFullYear() === selYear && e.action === "Clock In"; });
-          const uniquePresent = new Set(monthClockIns.map(e => e.member_id)).size;
-          const monthInc = activeIncidents.filter(i => { const d = new Date(i.timestamp); return d.getMonth() === selMonth && d.getFullYear() === selYear; });
-          const memberRows = TEAM_CONFIG.map(m => {
-            const present = monthClockIns.filter(e => e.member_id === m.id).length;
-            const scheduled = allSundays.filter(s => Object.values(s.slots).some(p => p.some(pair => pair.includes(m.id)))).length;
-            return { ...m, present, scheduled, pct: scheduled > 0 ? Math.round((present / scheduled) * 100) : 0 };
-          });
-          return (
-            <div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                <select value={selMonth} onChange={e => setSelMonth(+e.target.value)} style={{ flex: 1, background: "#0a0908", border: `1px solid ${C.border}`, borderRadius: 7, padding: "7px 10px", color: C.text, fontSize: 12, fontFamily: "Georgia, serif" }}>
-                  {Array.from({ length: 12 }, (_, i) => <option key={i} value={i}>{MON(i)}</option>)}
-                </select>
-                <select value={selYear} onChange={e => setSelYear(+e.target.value)} style={{ background: "#0a0908", border: `1px solid ${C.border}`, borderRadius: 7, padding: "7px 10px", color: C.text, fontSize: 12, fontFamily: "Georgia, serif" }}>
-                  {[2025, 2026].map(y => <option key={y}>{y}</option>)}
-                </select>
-              </div>
-              <div style={{ background: "linear-gradient(135deg,#1a1508,#0f1a0a)", border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 13px", marginBottom: 12, textAlign: "center" }}>
-                <div style={{ fontSize: 9, letterSpacing: 3, color: C.gold, textTransform: "uppercase" }}>✝ The Living Shield — LSC Abuja Safety Unit</div>
-                <div style={{ fontSize: 13, fontWeight: "bold", color: "#f0e6c8", marginTop: 2 }}>MONTHLY SUMMARY — {MON(selMonth).toUpperCase()} {selYear}</div>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginBottom: 12 }}>
-                {[{ label: "Services", value: totalDuties, color: C.gold }, { label: "Members Present", value: uniquePresent, color: C.green }, { label: "Incidents", value: monthInc.length, color: "#cd7a3a" }, { label: "Team Size", value: TEAM_CONFIG.length, color: C.blue }].map(s => (
-                  <div key={s.label} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 9, padding: "10px 8px", textAlign: "center" }}>
-                    <div style={{ fontSize: 20, fontWeight: "bold", color: s.color }}>{s.value}</div>
-                    <div style={{ fontSize: 9, color: C.dim, marginTop: 2 }}>{s.label}</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ fontSize: 11, color: C.gold, fontWeight: "bold", marginBottom: 8 }}>Attendance by Member</div>
-              {[...memberRows].sort((a, b) => b.pct - a.pct).map(m => (
-                <div key={m.id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 9, padding: "9px 12px", marginBottom: 5, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                    <div style={{ width: 26, height: 26, borderRadius: "50%", background: "#1e1c14", border: "1px solid #282420", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: C.muted }}>{m.id}</div>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: "bold", color: C.text }}>{m.name}</div>
-                      <div style={{ fontSize: 10, color: C.dim }}>{m.present}/{m.scheduled} services</div>
-                    </div>
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div style={{ fontSize: 14, fontWeight: "bold", color: m.pct >= 80 ? C.green : m.pct >= 50 ? C.amber : C.red }}>{m.pct}%</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          );
-        })()}
+        {tab === "monthly" && isAdmin && <MonthlyTab allClockEvents={allClockEvents} activeIncidents={activeIncidents} />}
+
 
         {/* ══ NOTICE ══ */}
         {tab === "notice" && isAdmin && (
@@ -1588,7 +1725,7 @@ function MainApp() {
 }
 
 // Wrap with error boundary
-export default function App() {
+function App() {
   return (
     <ErrorBoundary>
       <MainApp />
