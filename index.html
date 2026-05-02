@@ -605,6 +605,7 @@ function MainApp() {
   const [rosterMonth, setRosterMonth] = useState(0);
   const [reportData, setReportData] = useState(null);
   const [netError, setNetError] = useState(null);
+  const [notifPermission, setNotifPermission] = useState(typeof Notification !== "undefined" ? Notification.permission : "default");
 
   // Modals
   const [clockRoleModal, setClockRoleModal] = useState(false);
@@ -1300,6 +1301,19 @@ function MainApp() {
             ))}
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginTop: 6 }}>
+              {notifPermission !== "granted" && !IS_DEMO && (
+                <button onClick={async () => {
+                  const sub = await subscribeToPush(loggedIn.id);
+                  setNotifPermission(typeof Notification !== "undefined" ? Notification.permission : "default");
+                }} style={{ background: "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: "2px solid #4a8a4a", color: C.green, padding: "11px", borderRadius: 9, cursor: "pointer", fontSize: 12, fontFamily: "Georgia, serif", fontWeight: "bold", gridColumn: "span 2", marginBottom: 4 }}>
+                  🔔 Tap to Enable Alert Notifications
+                </button>
+              )}
+              {notifPermission === "granted" && !IS_DEMO && (
+                <button onClick={async () => { await subscribeToPush(loggedIn.id); }} style={{ background: C.surface, border: `1px solid #2a4a2a`, color: "#4a8a4a", padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 10, fontFamily: "Georgia, serif", gridColumn: "span 2" }}>
+                  ✓ Notifications enabled · Tap to refresh
+                </button>
+              )}
               <button onClick={() => setProfileModal(loggedIn)} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.muted, padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 11, fontFamily: "Georgia, serif" }}>👤 My Profile</button>
               <button onClick={() => setChangePinModal(true)} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.muted, padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 11, fontFamily: "Georgia, serif" }}>🔒 Change PIN</button>
               {!iAmIn && todayEntry && getMemberDuties(loggedIn.id, todayEntry).length > 0 && (
