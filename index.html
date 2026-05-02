@@ -750,8 +750,15 @@ function MainApp() {
     ch.on("INSERT", "public", "emergency_alerts", payload => {
       setEmergencyAlert(payload.new);
       playAlarm();
-      if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current);
-      emergencyTimerRef.current = setTimeout(() => setEmergencyAlert(null), 30000);
+      // Keep ringing every 8 seconds until dismissed
+      if (emergencyTimerRef.current) clearInterval(emergencyTimerRef.current);
+      emergencyTimerRef.current = setInterval(() => {
+        setEmergencyAlert(prev => {
+          if (prev) { playAlarm(); return prev; }
+          clearInterval(emergencyTimerRef.current);
+          return null;
+        });
+      }, 8000);
     });
     ch.on("UPDATE", "public", "emergency_alerts", payload => {
       if (!payload.new.active) setEmergencyAlert(null);
@@ -779,6 +786,13 @@ function MainApp() {
         if (data && data.length > 0) {
           const latestId = data[data.length - 1].id;
           if (latestId !== lastMsgIdRef.current) {
+            if (lastMsgIdRef.current !== 0) {
+              // New message arrived — beep if not sender
+              const latestMsg = data[data.length - 1];
+              if (latestMsg.sender_id !== (loggedIn ? loggedIn.id : null)) {
+                playMsgBeep();
+              }
+            }
             lastMsgIdRef.current = latestId;
             setMessages(data);
           }
@@ -804,6 +818,22 @@ function MainApp() {
     } catch (e) {}
     // Vibrate only on Android (iOS Safari doesn't support it)
     if (!isIOS() && navigator.vibrate) navigator.vibrate([400, 100, 400, 100, 400, 100, 600]);
+  }, []);
+
+  // ── CHAT BEEP ──
+  const playMsgBeep = useCallback(() => {
+    try {
+      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = audioCtx.current;
+      const osc = ctx.createOscillator(); const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = "sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.25);
+    } catch(e) {}
+    if (!isIOS() && navigator.vibrate) navigator.vibrate([80, 40, 80]);
   }, []);
 
   // ── SEED MEMBERS ──
@@ -929,6 +959,7 @@ function MainApp() {
   }
 
   async function dismissEmergency() {
+    if (emergencyTimerRef.current) clearInterval(emergencyTimerRef.current);
     setEmergencyAlert(null);
     if (!IS_DEMO && emergencyAlert?.id) {
       try { await (await sb.from("emergency_alerts")).update({ active: false }, `id=eq.${emergencyAlert.id}`); } catch (_) {}
@@ -1101,7 +1132,10 @@ function MainApp() {
             <div style={{ fontSize: 18, fontWeight: "bold", color: "#ffaaaa", marginBottom: 8 }}>{emergencyAlert.message}</div>
             <div style={{ fontSize: 11, color: "#aa4444", marginBottom: 16 }}>Raised by {emergencyAlert.raised_by} · {fT(emergencyAlert.timestamp)}</div>
             <div style={{ fontSize: 13, color: "#ff8888", fontWeight: "bold", marginBottom: 18 }}>ALL TEAM — CONVERGE NOW</div>
-            {isAdmin && <button onClick={dismissEmergency} style={{ background: "#2a0000", border: "1px solid #ff4444", color: "#ff6666", padding: "9px 22px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontSize: 12 }}>Dismiss Alert</button>}
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <button onClick={dismissEmergency} style={{ background: "#2a0000", border: "1px solid #ff4444", color: "#ff6666", padding: "9px 22px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontSize: 12 }}>✓ Acknowledged</button>
+              {isAdmin && <button onClick={dismissEmergency} style={{ background: "#3a0000", border: "1px solid #ff4444", color: "#ff9999", padding: "9px 22px", borderRadius: 9, cursor: "pointer", fontFamily: "Georgia, serif", fontSize: 12 }}>🔕 Dismiss for All</button>}
+            </div>
           </div>
         </div>
       )}
