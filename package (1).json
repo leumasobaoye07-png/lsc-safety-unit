@@ -1,0 +1,11 @@
+{
+  "name": "lsc-safety-unit",
+  "version": "1.0.0",
+  "description": "LSC Abuja Safety Unit — Living Shield",
+  "dependencies": {
+    "web-push": "^3.6.7"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
