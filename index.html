@@ -680,6 +680,10 @@ function MainApp() {
   const msgEndRef = useRef(null);
   const realtimeRef = useRef(null);
   const emergencyTimerRef = useRef(null);
+  const msgPollRef = useRef(null);
+const emergencyPollRef = useRef(null);
+const lastMsgIdRef = useRef(0);
+const lastEmergencyIdRef = useRef(0);
 
   // Demo mode state mirrors
   const [demoClockEvents, setDemoClockEvents] = useState([]);
