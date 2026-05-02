@@ -1,5 +1,5 @@
 // LSC Safety Unit — Service Worker v4
-// Handles: caching, push notifications, notification clicks
+// Handles: caching + push notifications + notification clicks
 
 const CACHE_NAME = 'lsc-safety-v4';
 const CACHE_URLS = [
@@ -11,7 +11,7 @@ const CACHE_URLS = [
   'https://unpkg.com/@babel/standalone/babel.min.js',
 ];
 
-// ── INSTALL ──────────────────────────────────────────────────────────────────
+// ── INSTALL ──
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME).then(cache =>
@@ -20,7 +20,7 @@ self.addEventListener('install', event => {
   );
 });
 
-// ── ACTIVATE ─────────────────────────────────────────────────────────────────
+// ── ACTIVATE ──
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys =>
@@ -29,7 +29,7 @@ self.addEventListener('activate', event => {
   );
 });
 
-// ── FETCH (cache-first, skip Supabase) ───────────────────────────────────────
+// ── FETCH (cache first) ──
 self.addEventListener('fetch', event => {
   if (event.request.url.includes('supabase.co')) return;
   if (event.request.url.includes('/api/')) return;
@@ -52,78 +52,100 @@ self.addEventListener('fetch', event => {
   );
 });
 
-// ── PUSH RECEIVED ─────────────────────────────────────────────────────────────
+// ── PUSH RECEIVED ──
 self.addEventListener('push', event => {
-  let data = {};
+  if (!event.data) return;
+
+  let payload;
   try {
-    data = event.data ? event.data.json() : {};
+    payload = event.data.json();
   } catch (e) {
-    data = { title: 'LSC Safety', body: event.data ? event.data.text() : 'New notification' };
+    payload = { title: '🛡️ LSC Safety', body: event.data.text(), type: 'general' };
   }
 
-  const isEmergency = data.type === 'emergency';
+  const isEmergency = payload.type === 'emergency';
 
   const options = {
-    body: data.body || 'New notification',
+    body: payload.body,
     icon: '/icon-192.png',
-    badge: '/icon-192.png',
-    tag: data.tag || (isEmergency ? 'emergency' : 'general'),
+    badge: '/icon-72.png',
+    vibrate: isEmergency
+      ? [400, 100, 400, 100, 400, 100, 600, 100, 600]  // Strong emergency pattern
+      : [200, 100, 200],                                  // Gentle chat pattern
+    tag: isEmergency ? 'emergency-alert' : `chat-${payload.timestamp}`,
+    requireInteraction: isEmergency, // Emergency stays until dismissed
     renotify: isEmergency,
-    requireInteraction: isEmergency,
     silent: false,
-    vibrate: isEmergency ? [400, 100, 400, 100, 400, 100, 600] : [200, 100, 200],
     data: {
-      url: data.url || '/',
-      type: data.type || 'general',
-      timestamp: Date.now(),
+      url: '/',
+      type: payload.type,
+      timestamp: payload.timestamp,
+      ...payload.data
     },
     actions: isEmergency
-      ? [{ action: 'open', title: '🚨 Open App' }]
-      : [{ action: 'open', title: 'View' }],
+      ? [{ action: 'open', title: '🚨 Open App NOW' }]
+      : [{ action: 'open', title: 'View' }, { action: 'dismiss', title: 'Dismiss' }]
   };
 
-  event.waitUntil(
-    self.registration.showNotification(
-      isEmergency ? '🚨 EMERGENCY ALERT — LSC Safety' : (data.title || 'LSC Safety Unit'),
-      options
-    )
-  );
+  // Group chat notifications — show count instead of spam
+  if (!isEmergency) {
+    event.waitUntil(
+      self.registration.getNotifications({ tag: 'chat-group' }).then(existing => {
+        if (existing.length > 0) {
+          // Update existing grouped notification
+          const count = (existing[0].data?.count || 1) + 1;
+          options.tag = 'chat-group';
+          options.body = `${count} new messages from the team`;
+          options.data = { ...options.data, count };
+          existing.forEach(n => n.close());
+        }
+        return self.registration.showNotification(
+          isEmergency ? '🚨 EMERGENCY ALERT' : '🛡️ LSC Safety Unit',
+          options
+        );
+      })
+    );
+  } else {
+    event.waitUntil(
+      self.registration.showNotification('🚨 EMERGENCY ALERT', options)
+    );
+  }
 });
 
-// ── NOTIFICATION CLICK ────────────────────────────────────────────────────────
+// ── NOTIFICATION CLICK ──
 self.addEventListener('notificationclick', event => {
   event.notification.close();
 
-  const targetUrl = event.notification.data?.url || '/';
+  if (event.action === 'dismiss') return;
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
-      // Focus existing window if open
+      // If app already open, focus it
       for (const client of clientList) {
         if (client.url.includes(self.location.origin) && 'focus' in client) {
-          client.postMessage({ type: 'NOTIFICATION_CLICK', data: event.notification.data });
           return client.focus();
         }
       }
-      // Otherwise open new window
-      if (clients.openWindow) return clients.openWindow(targetUrl);
+      // Otherwise open app
+      return clients.openWindow('/');
     })
   );
 });
 
-// ── PUSH SUBSCRIPTION CHANGE ──────────────────────────────────────────────────
+// ── PUSH SUBSCRIPTION CHANGE ──
+// Handles when browser rotates push subscription keys
 self.addEventListener('pushsubscriptionchange', event => {
   event.waitUntil(
     self.registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: event.oldSubscription?.options?.applicationServerKey,
+      applicationServerKey: self.VAPID_PUBLIC_KEY
     }).then(subscription => {
-      // Notify all clients to re-save subscription
-      return clients.matchAll().then(clientList => {
-        clientList.forEach(client => {
-          client.postMessage({ type: 'SUBSCRIPTION_CHANGED', subscription: subscription.toJSON() });
-        });
+      // Re-save new subscription to Supabase
+      return fetch('/api/update-subscription', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription })
       });
-    }).catch(e => console.error('pushsubscriptionchange failed:', e))
+    })
   );
 });
