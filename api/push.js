@@ -1,6 +1,5 @@
-// api/send-notification.js
+// api/push.js
 // Vercel serverless function — sends Web Push notifications
-// Requires: npm install web-push (add to package.json)
 
 const webpush = require('web-push');
 
@@ -15,16 +14,8 @@ webpush.setVapidDetails(
   VAPID_PRIVATE_KEY
 );
 
-async function getSubscriptions(filterInactive = false) {
-  let url = `${SUPABASE_URL}/rest/v1/push_subscriptions?select=*`;
-  
-  if (filterInactive) {
-    // Only get subscriptions for inactive users (last_seen > 15 seconds ago)
-    const cutoff = new Date(Date.now() - 15000).toISOString();
-    url = `${SUPABASE_URL}/rest/v1/push_subscriptions?select=*,members!inner(last_seen)&members.last_seen=lt.${cutoff}`;
-  }
-
-  const res = await fetch(url, {
+async function getAllSubscriptions() {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/push_subscriptions?select=*`, {
     headers: {
       'apikey': SUPABASE_ANON_KEY,
       'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
@@ -43,23 +34,21 @@ async function removeExpiredSubscription(endpoint) {
   });
 }
 
-export default async function handler(req, res) {
-  // Only allow POST
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+module.exports = async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  // Basic auth check — must include supabase anon key as bearer
-  const auth = req.headers.authorization;
-  if (!auth || !auth.includes(SUPABASE_ANON_KEY)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { type, title, body, data, targetAll = false } = req.body;
+  const { type, title, body, data, subscriptions: clientSubs } = req.body;
 
   if (!title || !body) {
     return res.status(400).json({ error: 'title and body required' });
   }
+
+  const isEmergency = type === 'emergency';
 
   const payload = JSON.stringify({
     title,
@@ -69,10 +58,11 @@ export default async function handler(req, res) {
     timestamp: Date.now()
   });
 
-  // Emergency alerts go to ALL users
-  // Chat notifications go only to inactive users
-  const isEmergency = type === 'emergency';
-  const subscriptions = await getSubscriptions(!isEmergency);
+  // Use subscriptions passed from client if provided, else fetch all from DB
+  let subscriptions = clientSubs;
+  if (!subscriptions || !subscriptions.length) {
+    subscriptions = await getAllSubscriptions();
+  }
 
   if (!subscriptions || subscriptions.length === 0) {
     return res.status(200).json({ sent: 0, message: 'No subscribers' });
@@ -83,22 +73,21 @@ export default async function handler(req, res) {
       const pushSubscription = {
         endpoint: sub.endpoint,
         keys: {
-          p256dh: sub.p256dh,
-          auth: sub.auth
+          p256dh: sub.p256dh || sub.keys?.p256dh,
+          auth: sub.auth || sub.keys?.auth
         }
       };
 
       const options = {
-        TTL: isEmergency ? 86400 : 3600, // Emergency: 24h, Chat: 1h
+        TTL: isEmergency ? 86400 : 3600,
         urgency: isEmergency ? 'high' : 'normal',
-        topic: isEmergency ? 'emergency' : `chat-${Date.now()}` // deduplication tag
+        topic: isEmergency ? 'emergency' : 'chat'
       };
 
       try {
         await webpush.sendNotification(pushSubscription, payload, options);
-        return { success: true, endpoint: sub.endpoint };
+        return { success: true };
       } catch (err) {
-        // 410 Gone = subscription expired, remove it
         if (err.statusCode === 410 || err.statusCode === 404) {
           await removeExpiredSubscription(sub.endpoint);
         }
@@ -111,4 +100,4 @@ export default async function handler(req, res) {
   const failed = results.length - sent;
 
   return res.status(200).json({ sent, failed, total: results.length });
-}
+};
