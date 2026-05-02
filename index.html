@@ -633,6 +633,8 @@ function MainApp() {
   const emergencyTimerRef = useRef(null);
   const msgPollRef = useRef(null);
   const lastMsgIdRef = useRef(0);
+  const emergencyPollRef = useRef(null);
+  const lastEmergencyIdRef = useRef(0);
 
   // Demo mode state mirrors
   const [demoClockEvents, setDemoClockEvents] = useState([]);
@@ -655,7 +657,7 @@ function MainApp() {
     const n = new Date(); const m = n.getMonth(); const y = n.getFullYear();
     const qm = { 0:"Q1",1:"Q1",2:"Q1",3:"Q2",4:"Q2",5:"Q2",6:"Q3",7:"Q3",8:"Q3",9:"Q4",10:"Q4",11:"Q4" };
     const qk = `${qm[m]}-${y}`; if (QUARTERS[qk]) { setRosterQ(qk); setRosterMonth(0); }
-    return () => { clearInterval(timer); if (realtimeRef.current) realtimeRef.current.unsubscribe(); if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current); if (msgPollRef.current) clearInterval(msgPollRef.current); };
+    return () => { clearInterval(timer); if (realtimeRef.current) realtimeRef.current.unsubscribe(); if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current); if (msgPollRef.current) clearInterval(msgPollRef.current); if (emergencyPollRef.current) clearInterval(emergencyPollRef.current); };
   }, []);
 
   async function initApp() {
@@ -789,6 +791,7 @@ function MainApp() {
     ch.subscribe();
     realtimeRef.current = ch;
     startMsgPolling();
+    startEmergencyPolling();
   }
 
   function startMsgPolling() {
@@ -801,7 +804,6 @@ function MainApp() {
           const latestId = data[data.length - 1].id;
           if (latestId !== lastMsgIdRef.current) {
             if (lastMsgIdRef.current !== 0) {
-              // New message arrived — beep if not sender
               const latestMsg = data[data.length - 1];
               if (latestMsg.sender_id !== (loggedIn ? loggedIn.id : null)) {
                 playMsgBeep();
@@ -813,6 +815,42 @@ function MainApp() {
         }
       } catch(e) {}
     }, 3000);
+  }
+
+  function startEmergencyPolling() {
+    if (emergencyPollRef.current) clearInterval(emergencyPollRef.current);
+    emergencyPollRef.current = setInterval(async () => {
+      try {
+        const db = await sb.from("emergency_alerts");
+        const { data } = await db.select("*", { filter: "active=eq.true", order: "timestamp.desc", limit: 1 });
+        if (data && data.length > 0) {
+          const alert = data[0];
+          if (alert.id !== lastEmergencyIdRef.current) {
+            lastEmergencyIdRef.current = alert.id;
+            setEmergencyAlert(alert);
+            playAlarm();
+            if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
+            if (emergencyTimerRef.current) clearInterval(emergencyTimerRef.current);
+            emergencyTimerRef.current = setInterval(() => {
+              setEmergencyAlert(prev => {
+                if (prev) {
+                  playAlarm();
+                  if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,200,800]);
+                  return prev;
+                }
+                clearInterval(emergencyTimerRef.current);
+                return null;
+              });
+            }, 6000);
+          }
+        } else {
+          // No active alerts — clear if we had one
+          if (lastEmergencyIdRef.current !== 0) {
+            lastEmergencyIdRef.current = 0;
+          }
+        }
+      } catch(e) {}
+    }, 2000);
   }
 
   // ── ALARM ──
