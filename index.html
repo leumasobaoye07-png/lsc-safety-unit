@@ -389,8 +389,6 @@ const isSunday = () => new Date().getDay() === 0;
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent);
 const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 const canUsePush = () => 'PushManager' in window && 'serviceWorker' in navigator;
-const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
-const canUsePush = () => 'PushManager' in window && 'serviceWorker' in navigator;
 const getMember = id => TEAM_CONFIG.find(m => m.id === id);
 
 function getCurrentDuty() {
@@ -836,6 +834,22 @@ function MainApp() {
     });
     ch.subscribe();
     realtimeRef.current = ch;
+  // ── CHAT BEEP ──
+  const playMsgBeep = useCallback(() => {
+    try {
+      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = audioCtx.current;
+      const osc = ctx.createOscillator(); const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = "sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.25);
+    } catch(e) {}
+    if (!isIOS() && navigator.vibrate) navigator.vibrate([80, 40, 80]);
+  }, []);
+  
     startMsgPolling();
     startEmergencyPolling();
   }
@@ -919,22 +933,7 @@ function MainApp() {
     if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
   }, []);
 
-  // ── CHAT BEEP ──
-  const playMsgBeep = useCallback(() => {
-    try {
-      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
-      const ctx = audioCtx.current;
-      const osc = ctx.createOscillator(); const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.type = "sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.25);
-    } catch(e) {}
-    if (!isIOS() && navigator.vibrate) navigator.vibrate([80, 40, 80]);
-  }, []);
-
+ 
   // ── SEED MEMBERS ──
   async function seedMembers() {
     setSeeding(true);
