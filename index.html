@@ -387,8 +387,6 @@ const fDL = iso => !iso ? "—" : new Date(iso).toLocaleDateString("en-NG", { da
 const todayStr = () => new Date().toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 const isSunday = () => new Date().getDay() === 0;
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent);
-const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
-const canUsePush = () => 'PushManager' in window && 'serviceWorker' in navigator;
 const getMember = id => TEAM_CONFIG.find(m => m.id === id);
 
 function getCurrentDuty() {
@@ -834,22 +832,6 @@ function MainApp() {
     });
     ch.subscribe();
     realtimeRef.current = ch;
-  // ── CHAT BEEP ──
-  const playMsgBeep = useCallback(() => {
-    try {
-      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
-      const ctx = audioCtx.current;
-      const osc = ctx.createOscillator(); const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.type = "sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.25);
-    } catch(e) {}
-    if (!isIOS() && navigator.vibrate) navigator.vibrate([80, 40, 80]);
-  }, []);
-  
     startMsgPolling();
     startEmergencyPolling();
   }
@@ -933,7 +915,22 @@ function MainApp() {
     if (!isIOS() && navigator.vibrate) navigator.vibrate([300,100,300,100,300,100,500,100,500,100,500,200,800]);
   }, []);
 
- 
+  // ── CHAT BEEP ──
+  const playMsgBeep = useCallback(() => {
+    try {
+      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = audioCtx.current;
+      const osc = ctx.createOscillator(); const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = "sine"; osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.25);
+    } catch(e) {}
+    if (!isIOS() && navigator.vibrate) navigator.vibrate([80, 40, 80]);
+  }, []);
+
   // ── SEED MEMBERS ──
   async function seedMembers() {
     setSeeding(true);
@@ -1207,8 +1204,8 @@ function MainApp() {
         )}
         {loginStep === "pin" && selectedMember && (
           IS_DEMO
-            ? <PinPad member={{ ...selectedMember, pin_hash: DEMO_PIN_HASH }} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember);if (!IS_DEMO && canUsePush() && (!isIOS() || isStandalone())) subscribeToPush(selectedMember.id);setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
-            : <PinPad member={selectedMember} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember); if (!IS_DEMO && canUsePush() && (!isIOS() || isStandalone())) subscribeToPush(selectedMember.id); setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
+            ? <PinPad member={{ ...selectedMember, pin_hash: DEMO_PIN_HASH }} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember); if (!IS_DEMO) subscribeToPush(selectedMember.id);setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
+            : <PinPad member={selectedMember} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember); if (!IS_DEMO) subscribeToPush(selectedMember.id); setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
         )}
       </div>
     );
@@ -1345,32 +1342,18 @@ function MainApp() {
               </div>
             ))}
 
-          {!IS_DEMO && (
-  isIOS() && !isStandalone()
-    ? (
-      <div style={{ width: "100%", background: "linear-gradient(135deg,#1a1008,#2a1a08)", border: "2px solid #8a6a18", color: "#e8c870", padding: "13px 14px", borderRadius: 9, fontSize: 12, fontFamily: "Georgia, serif", marginBottom: 8, lineHeight: 1.7, boxSizing: "border-box" }}>
-        <div style={{ fontWeight: "bold", marginBottom: 4 }}>📲 Enable Notifications (iPhone)</div>
-        <div style={{ fontSize: 11, color: "#a09050" }}>To receive alerts on your iPhone:<br/>1. Tap the <strong style={{color:"#e8c870"}}>Share</strong> icon in Safari (□↑)<br/>2. Select <strong style={{color:"#e8c870"}}>"Add to Home Screen"</strong><br/>3. Open the app from your Home Screen<br/>4. Tap the notification button again</div>
-      </div>
-    )
-    : !IS_DEMO && canUsePush() && (
-      <button onClick={async () => {
-        try {
-          if (isIOS() && !isStandalone()) {
-            alert("Please install this app to your Home Screen first (Safari → Share → Add to Home Screen), then open it from there.");
-            return;
-          }
-          const sub = await subscribeToPush(loggedIn.id);
-          const perm = ("Notification" in window) ? Notification.permission : "not-supported";
-          setNotifPermission(perm);
-          if (sub) alert("✓ Notifications enabled!");
-          else alert("Could not enable. Permission: " + perm + "\n\nOn iPhone: make sure you opened this app from your Home Screen.");
-        } catch(e) { alert("Error: " + e.message); }
-      }} style={{ width: "100%", background: "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: "2px solid #4a8a4a", color: C.green, padding: "13px", borderRadius: 9, cursor: "pointer", fontSize: 13, fontFamily: "Georgia, serif", fontWeight: "bold", marginBottom: 8, display: "block", boxSizing: "border-box" }}>
-        🔔 {notifPermission === "granted" ? "✓ Notifications On — Tap to Refresh" : "Tap to Enable Notifications"}
-      </button>
-    )
-)}
+            {!IS_DEMO && (
+              <button onClick={async () => {
+                try {
+                  const sub = await subscribeToPush(loggedIn.id);
+                  const perm = ("Notification" in window) ? Notification.permission : "unavailable";
+                  setNotifPermission(perm);
+                  alert(sub ? "Notifications enabled!" : "Could not enable — permission: " + perm);
+                } catch(e) { alert("Error: " + e.message); }
+              }} style={{ width: "100%", background: "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: "2px solid #4a8a4a", color: C.green, padding: "13px", borderRadius: 9, cursor: "pointer", fontSize: 13, fontFamily: "Georgia, serif", fontWeight: "bold", marginBottom: 8, display: "block", boxSizing: "border-box", zIndex: 10, position: "relative" }}>
+                🔔 {notifPermission === "granted" ? "✓ Notifications On — Tap to Refresh" : "Tap to Enable Notifications"}
+              </button>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginTop: 6 }}>
 
               <button onClick={() => setProfileModal(loggedIn)} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.muted, padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 11, fontFamily: "Georgia, serif" }}>👤 My Profile</button>
