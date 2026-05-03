@@ -1324,18 +1324,17 @@ function MainApp() {
               </div>
             ))}
 
-            {!IS_DEMO && notifPermission !== "granted" && (
+            {!IS_DEMO && (
               <button onClick={async () => {
-                await subscribeToPush(loggedIn.id);
-                setNotifPermission(typeof Notification !== "undefined" ? Notification.permission : "default");
-              }} style={{ width: "100%", background: "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: "2px solid #4a8a4a", color: C.green, padding: "13px", borderRadius: 9, cursor: "pointer", fontSize: 13, fontFamily: "Georgia, serif", fontWeight: "bold", marginBottom: 8, display: "block", boxSizing: "border-box" }}>
-                🔔 Tap Here to Enable Notifications
+                try {
+                  const sub = await subscribeToPush(loggedIn.id);
+                  const perm = ("Notification" in window) ? Notification.permission : "unavailable";
+                  setNotifPermission(perm);
+                  alert(sub ? "Notifications enabled!" : "Could not enable — permission: " + perm);
+                } catch(e) { alert("Error: " + e.message); }
+              }} style={{ width: "100%", background: "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: "2px solid #4a8a4a", color: C.green, padding: "13px", borderRadius: 9, cursor: "pointer", fontSize: 13, fontFamily: "Georgia, serif", fontWeight: "bold", marginBottom: 8, display: "block", boxSizing: "border-box", zIndex: 10, position: "relative" }}>
+                🔔 {notifPermission === "granted" ? "✓ Notifications On — Tap to Refresh" : "Tap to Enable Notifications"}
               </button>
-            )}
-            {!IS_DEMO && notifPermission === "granted" && (
-              <div style={{ background: "#0a1a0a", border: "1px solid #2a4a2a", borderRadius: 9, padding: "8px 12px", marginBottom: 8, fontSize: 10, color: "#4a8a4a", textAlign: "center" }}>
-                ✓ Notifications enabled on this device
-              </div>
             )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginTop: 6 }}>
 
