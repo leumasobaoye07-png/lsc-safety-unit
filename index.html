@@ -629,6 +629,7 @@ function MainApp() {
   const [coverForm, setCoverForm] = useState({ reason: "" });
 
   const audioCtx = useRef(null);
+  const audioUnlocked = useRef(false);
   const msgEndRef = useRef(null);
   const realtimeRef = useRef(null);
   const emergencyTimerRef = useRef(null);
@@ -646,6 +647,28 @@ function MainApp() {
   const [demoSpecialEvents, setDemoSpecialEvents] = useState([]);
 
   useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, demoMessages]);
+
+  // Unlock iOS audio on first touch
+  useEffect(() => {
+    const unlock = async () => {
+      if (audioUnlocked.current) return;
+      try {
+        if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.current.state === "suspended") await audioCtx.current.resume();
+        // Play silent buffer to unlock
+        const buf = audioCtx.current.createBuffer(1, 1, 22050);
+        const src = audioCtx.current.createBufferSource();
+        src.buffer = buf; src.connect(audioCtx.current.destination); src.start(0);
+        audioUnlocked.current = true;
+      } catch(e) {}
+    };
+    document.addEventListener("touchstart", unlock, { once: true });
+    document.addEventListener("click", unlock, { once: true });
+    return () => {
+      document.removeEventListener("touchstart", unlock);
+      document.removeEventListener("click", unlock);
+    };
+  }, []);
 
   // ── LOAD & INIT ──
   useEffect(() => {
@@ -858,6 +881,7 @@ function MainApp() {
   const playAlarm = useCallback(() => {
     try {
       if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.current.state === "suspended") audioCtx.current.resume();
       const ctx = audioCtx.current;
       [0, 0.3, 0.6, 0.9, 1.2, 1.5].forEach(t => {
         const osc = ctx.createOscillator(); const gain = ctx.createGain();
@@ -1300,20 +1324,21 @@ function MainApp() {
               </div>
             ))}
 
+            {!IS_DEMO && notifPermission !== "granted" && (
+              <button onClick={async () => {
+                await subscribeToPush(loggedIn.id);
+                setNotifPermission(typeof Notification !== "undefined" ? Notification.permission : "default");
+              }} style={{ width: "100%", background: "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: "2px solid #4a8a4a", color: C.green, padding: "13px", borderRadius: 9, cursor: "pointer", fontSize: 13, fontFamily: "Georgia, serif", fontWeight: "bold", marginBottom: 8, display: "block", boxSizing: "border-box" }}>
+                🔔 Tap Here to Enable Notifications
+              </button>
+            )}
+            {!IS_DEMO && notifPermission === "granted" && (
+              <div style={{ background: "#0a1a0a", border: "1px solid #2a4a2a", borderRadius: 9, padding: "8px 12px", marginBottom: 8, fontSize: 10, color: "#4a8a4a", textAlign: "center" }}>
+                ✓ Notifications enabled on this device
+              </div>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginTop: 6 }}>
-              {notifPermission !== "granted" && !IS_DEMO && (
-                <button onClick={async () => {
-                  const sub = await subscribeToPush(loggedIn.id);
-                  setNotifPermission(typeof Notification !== "undefined" ? Notification.permission : "default");
-                }} style={{ background: "linear-gradient(135deg,#0a1a0a,#1a2a0a)", border: "2px solid #4a8a4a", color: C.green, padding: "11px", borderRadius: 9, cursor: "pointer", fontSize: 12, fontFamily: "Georgia, serif", fontWeight: "bold", gridColumn: "span 2", marginBottom: 4 }}>
-                  🔔 Tap to Enable Alert Notifications
-                </button>
-              )}
-              {notifPermission === "granted" && !IS_DEMO && (
-                <button onClick={async () => { await subscribeToPush(loggedIn.id); }} style={{ background: C.surface, border: `1px solid #2a4a2a`, color: "#4a8a4a", padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 10, fontFamily: "Georgia, serif", gridColumn: "span 2" }}>
-                  ✓ Notifications enabled · Tap to refresh
-                </button>
-              )}
+
               <button onClick={() => setProfileModal(loggedIn)} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.muted, padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 11, fontFamily: "Georgia, serif" }}>👤 My Profile</button>
               <button onClick={() => setChangePinModal(true)} style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.muted, padding: "9px", borderRadius: 9, cursor: "pointer", fontSize: 11, fontFamily: "Georgia, serif" }}>🔒 Change PIN</button>
               {!iAmIn && todayEntry && getMemberDuties(loggedIn.id, todayEntry).length > 0 && (
