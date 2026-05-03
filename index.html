@@ -154,37 +154,55 @@ function urlB64ToUint8Array(base64String) {
 
 async function subscribeToPush(memberId) {
   try {
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      console.warn('Push not supported');
+      return null;
+    }
+    // iOS 16.4+ PWA: must request permission explicitly first
+    if ('Notification' in window) {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') {
+        console.warn('Notification permission denied:', perm);
+        return null;
+      }
+    }
     const reg = await navigator.serviceWorker.ready;
     let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY),
-      });
+    if (sub) {
+      // Already subscribed — just re-save to DB
+      const subJson = sub.toJSON();
+      await savePushSub(memberId, subJson);
+      return sub;
     }
-    const subJson = sub.toJSON();
-    // Upsert - update if endpoint exists, insert if new
-    await fetch(SUPABASE_URL + '/rest/v1/push_subscriptions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-        'Prefer': 'resolution=merge-duplicates'
-      },
-      body: JSON.stringify({
-        member_id: memberId,
-        endpoint: subJson.endpoint,
-        p256dh: subJson.keys?.p256dh,
-        auth: subJson.keys?.auth,
-      })
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY),
     });
+    const subJson = sub.toJSON();
+    await savePushSub(memberId, subJson);
     return sub;
   } catch (e) {
     console.warn('Push subscribe failed:', e.message);
     return null;
   }
+}
+
+async function savePushSub(memberId, subJson) {
+  await fetch(SUPABASE_URL + '/rest/v1/push_subscriptions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+      'Prefer': 'resolution=merge-duplicates'
+    },
+    body: JSON.stringify({
+      member_id: memberId,
+      endpoint: subJson.endpoint,
+      p256dh: subJson.keys?.p256dh,
+      auth: subJson.keys?.auth,
+    })
+  });
 }
 
 async function sendPushToAll(payload) {
