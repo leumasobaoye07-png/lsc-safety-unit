@@ -389,6 +389,8 @@ const isSunday = () => new Date().getDay() === 0;
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent);
 const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 const canUsePush = () => 'PushManager' in window && 'serviceWorker' in navigator;
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+const canUsePush = () => 'PushManager' in window && 'serviceWorker' in navigator;
 const getMember = id => TEAM_CONFIG.find(m => m.id === id);
 
 function getCurrentDuty() {
@@ -1206,7 +1208,7 @@ function MainApp() {
         )}
         {loginStep === "pin" && selectedMember && (
           IS_DEMO
-            ? <PinPad member={{ ...selectedMember, pin_hash: DEMO_PIN_HASH }} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember); if (!IS_DEMO && canUsePush() && (!isIOS() || isStandalone())) subscribeToPush(selectedMember.id);setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
+            ? <PinPad member={{ ...selectedMember, pin_hash: DEMO_PIN_HASH }} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember);if (!IS_DEMO && canUsePush() && (!isIOS() || isStandalone())) subscribeToPush(selectedMember.id);setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
             : <PinPad member={selectedMember} onSuccess={() => { setLoggedIn(selectedMember); saveSession(selectedMember); if (!IS_DEMO && canUsePush() && (!isIOS() || isStandalone())) subscribeToPush(selectedMember.id); setLoginStep("select"); setTab("home"); }} onCancel={() => { setLoginStep("select"); setSelectedMember(null); }} />
         )}
       </div>
