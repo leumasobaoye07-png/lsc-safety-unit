@@ -1,7 +1,7 @@
 // LSC Safety Unit — Service Worker v4
 // Handles: caching + push notifications + notification clicks
 
-const CACHE_NAME = 'lsc-safety-v4';
+const CACHE_NAME = 'lsc-safety-v5';
 const CACHE_URLS = [
   '/',
   '/index.html',
@@ -134,13 +134,21 @@ self.addEventListener('notificationclick', event => {
 
 // ── PUSH SUBSCRIPTION CHANGE ──
 // Handles when browser rotates push subscription keys
+const VAPID_PUBLIC_KEY = 'BDbu43RqzhNIiFE3McOiIE5eY2pBF0ZCp0N_Uc4RS6dy7UC5uGRzVr1IiBfaEJFXQGIKftNpwo1aSXqbHyG8iIY';
+
+function urlB64ToUint8Array(b64) {
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const base64 = (b64 + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
 self.addEventListener('pushsubscriptionchange', event => {
   event.waitUntil(
     self.registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: self.VAPID_PUBLIC_KEY
+      applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY)
     }).then(subscription => {
-      // Re-save new subscription to Supabase
       return fetch('/api/update-subscription', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
